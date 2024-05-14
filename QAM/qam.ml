@@ -44,7 +44,7 @@ let rec transform_membrane = function
                        CompositeMembrane (List.map (fun m -> SimpleMembrane m) ms |> List.tl)) *)
 
 (* CL and CR rules *)
-| SimpleMembrane (SingleMolecule (Choice (r, t), res)) ->  
+(* | SimpleMembrane (SingleMolecule (Choice (r, t), res)) ->  
     if Random.bool () then SimpleMembrane (SingleMolecule (r, res))
     else SimpleMembrane (SingleMolecule (t, res))
 (* MT rule *)
@@ -62,8 +62,31 @@ let rec transform_membrane = function
 | SimpleMembrane (ProcessMolecule (Replication p)) -> 
     CompositeMembrane (SimpleMembrane (ProcessMolecule p), SimpleMembrane (ProcessMolecule (Replication p)))  
 
-| membrane -> membrane
+| membrane -> membrane *)
 
+ (* ID1 *)
+| SimpleMembrane [] -> [NullMembrane] 
+ (* Single molecule handling *)
+  | SimpleMembrane [m] -> begin match m with 
+
+  (* ID1, ID2 *)
+      | NullMolecule | ProcessMolecule NullProcess -> [NullMembrane]
+      (* CL and CR rules *)
+      | SimpleMembrane (SingleMolecule (Choice (r, t), res)) ->  
+        if Random.bool () then SimpleMembrane (SingleMolecule (r, res))
+        else SimpleMembrane (SingleMolecule (t, res))
+        (* NT *)
+      | ProcessMolecule (Replication NullProcess) -> [NullMembrane]  
+       (* MT *)
+      | ProcessMolecule (Replication p) -> [SimpleMembrane [ProcessMolecule p]; SimpleMembrane [ProcessMolecule (Replication p)]] 
+      (* Decoherence *)
+      | ResourceMolecule NullResource -> [NullMembrane]  
+      | _ -> [SimpleMembrane [m]]
+    end
+    (* Split *)
+  | SimpleMembrane ms when List.length ms > 1 -> List.map (fun m -> SimpleMembrane [m]) ms  
+    (* Default case *)
+  | membrane -> [membrane]
 
 (*Implementation of the Semantics *) 
 let rec evaluate_process = function
