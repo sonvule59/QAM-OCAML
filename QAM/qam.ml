@@ -43,32 +43,6 @@ The operation design
 *****************************************************************************************************)
 (* Type definition *)
 
-(* Define complex numbers for quantum computations *)
-type complex = { re: float; im: float }
-
-(* Define quantum gates and their effects on qubits *)
-type quantum_gate =
-  | Identity of int
-  | PauliX of int
-  | PauliZ of int
-  | Hadamard of int
-  | CNOT of int * int
-  | TGate of int
-  | CustomGate of complex array array
-
-(* Define the quantum state based on the number of qubits and their states *)
-type quantum_state = {
-  num_qubits: int;
-  state_vector: complex array;
-}
-(* Define Boolean type *)
-type boolean_expr =
-  | True
-  | False
-  | QuantumMeasurementResult of int  
-  | ClassicalComparison of string * string 
-
-
 (*Define Syntax *)
 type resource =
   | SimpleResource of string * string   (* α.μ *)
