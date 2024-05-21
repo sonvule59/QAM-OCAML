@@ -43,6 +43,13 @@ The operation design
 *****************************************************************************************************)
 (* Type definition *)
 
+(* Define Boolean type *)
+type boolean_expr =
+  | True
+  | False
+  | QuantumMeasurementResult of int  
+  | ClassicalComparison of string * string 
+
 (*Define Syntax *)
 type resource =
   | SimpleResource of string * string   (* α.μ *)
@@ -59,9 +66,11 @@ type process =
   | NullProcess                         (* 0 *)
   | ActionProcess of action * process   (* AR *)
   | Choice of process * process         (* R + T *)
+  | Message of name * message * process
   | Replication of process              (* !R *)
   | If of boolean_expr * process * process  (* If condition, then process, else process *)
   | While of boolean_expr * process  (* While condition holds, perform process *)
+  | Conditional of (process -> bool) * process * process
 
 type molecule =
   | NullMolecule
@@ -72,9 +81,32 @@ type membrane =
   | NullMembrane
   | MoleculeMembrane of molecule list         (* {|M|} *)
   | AirlockedMembrane of membrane * resource * membrane  (* P |[ϕ]| Q *)
+(* 
+type membrane = {
+  processes: process list;
+  location: location;
+} *)
 
+let rec simulate_process process =
+  match process with
+  | NullProcess -> "End of process"
+  | Operation (action, next) ->
+    begin
+      match action with
+      | Send (channel, message) -> Printf.sprintf "Sending %s on channel %s\n" (match message with QuantumData q -> q | ClassicalData c -> c) channel
+      | Receive (channel, message) -> Printf.sprintf "Receiving %s on channel %s\n" (match message with QuantumData q -> q | ClassicalData c -> c) channel
+      | Move location -> Printf.sprintf "Moving to location %s\n" location
+    end ^ simulate_process next
+  | Message (channel, message, next) ->
+    Printf.sprintf "Handling message on channel %s\n" channel ^ simulate_process next
+  | Transition (state, new_location, next) ->
+    Printf.sprintf "Transitioning from %s to %s\n" state.location new_location ^ simulate_process next
+  | Conditional (pred, p1, p2) -> (*Note that Conditional represents both If and While *)
+    if pred NullProcess then simulate_process p1 else simulate_process p2
+  | Parallel (p1, p2) ->
+    simulate_process p1 ^ simulate_process p2
 
-  (* Semantic Rules and the function for membrane*)
+  (* Function for membrane*)
 let rec transform_membrane = function
 (* Split rule *)
 | MoleculeMembrane ms ->  (* Split rule *)
@@ -121,10 +153,30 @@ let rec evaluate_process = function
       evaluate_process p;
       evaluate_process (Replication p)
 
-let () =
+(* let () = *)
 let results = execute_process initial_process in
 print_results results
 
  (*QAM Sytax Extension  *) 
+(* type channel = string *)
+let rec traces process =
+  match process with
+  | NullProcess -> [[]]  (* Base case: return a list with an empty trace *)
+  | Action (action, next) -> 
+    List.map (fun trace -> action :: trace) (traces next)
+  | Parallel (p1, p2) ->
+    let traces1 = traces p1 in
+    let traces2 = traces p2 in
+    List.flatten (List.map (fun trace1 -> List.map (fun trace2 -> trace1 @ trace2) traces2) traces1)
+  | Choice (p1, p2) ->
+    traces p1 @ traces p2
+
+(*Implement Equivalence *)
+let equivalent p1 p2 =
+  let traces1 = traces p1 in
+  let traces2 = traces p2 in
+  List.for_all (fun trace1 -> List.exists (fun trace2 -> trace1 = trace2) traces2) traces1 &&
+  List.for_all (fun trace2 -> List.exists (fun trace1 -> trace1 = trace2) traces1) traces2
+
 (* type locations = 
 type success_rate =  *)
