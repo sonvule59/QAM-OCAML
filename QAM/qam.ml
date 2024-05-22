@@ -157,26 +157,5 @@ let rec evaluate_process = function
 let results = execute_process initial_process in
 print_results results
 
- (*QAM Sytax Extension  *) 
-(* type channel = string *)
-let rec traces process =
-  match process with
-  | NullProcess -> [[]]  (* Base case: return a list with an empty trace *)
-  | Action (action, next) -> 
-    List.map (fun trace -> action :: trace) (traces next)
-  | Parallel (p1, p2) ->
-    let traces1 = traces p1 in
-    let traces2 = traces p2 in
-    List.flatten (List.map (fun trace1 -> List.map (fun trace2 -> trace1 @ trace2) traces2) traces1)
-  | Choice (p1, p2) ->
-    traces p1 @ traces p2
-
-(*Implement Equivalence *)
-let equivalent p1 p2 =
-  let traces1 = traces p1 in
-  let traces2 = traces p2 in
-  List.for_all (fun trace1 -> List.exists (fun trace2 -> trace1 = trace2) traces2) traces1 &&
-  List.for_all (fun trace2 -> List.exists (fun trace1 -> trace1 = trace2) traces1) traces2
-
 (* type locations = 
 type success_rate =  *)
