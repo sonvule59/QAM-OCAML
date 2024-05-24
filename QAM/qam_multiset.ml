@@ -21,7 +21,7 @@ let transition membrane =
   { membrane with processes = List.concat_map (fun p ->
     match p with
     | ActionProcess (Send (ch, msg), ps) -> 
-        [ActionProcess (Receive (ch, msg), ps)]  (* Simplify transition *)
+        [ActionProcess (Receive (ch, msg), ps)] 
     | _ -> [p]
   ) membrane.processes }
     (* processes = List.map (fun p ->
@@ -39,6 +39,18 @@ let rec normalize_process process =
   | ActionProcess (action, next) -> ActionProcess (action, normalize_process next)
   | Replication proc -> Replication (normalize_process proc)
   | _ -> process
+
+(* Function to execute one step process *)
+  let rec execute_process = function
+  | NullProcess -> []
+  | ActionProcess (action, next) ->
+    (match action with
+     | NewChannel (n, p) -> [(NamedProcess n, execute_process p)]
+     | Send (n, m) -> [(NamedProcess n, [m])]
+     | Receive (n, m) -> [(NamedProcess n, [])]) @ execute_process next
+  | Choice (p1, p2) ->
+    execute_process p1 @ execute_process p2
+  | _ -> []
 
 (* Dummy functions for loc and is_q *)
 let loc _ _ = ("loc1", "loc2")
@@ -72,9 +84,9 @@ let compare_process p1 p2 =
 
  (*QAM Sytax Extension  *) 
 (* type channel = string *)
-let rec traces process =
+(* let rec traces process =
   match process with
-  | NullProcess -> [[]]  (* Base case: return a list with an empty trace *)
+  | NullProcess -> ()  (* Base case: return a list with an empty trace *)
   | ActionProcess (action, next) -> 
     List.map (fun trace -> action :: trace) (traces next)
   | Parallel (p1, p2) ->
@@ -82,7 +94,29 @@ let rec traces process =
     let traces2 = traces p2 in
     List.flatten (List.map (fun trace1 -> List.map (fun trace2 -> trace1 @ trace2) traces2) traces1)
   | Choice (p1, p2) ->
-    traces p1 @ traces p2
+    traces p1 @ traces p2 *)
+
+
+(* Compute traces for the head process in the list *)
+let traces_process_list plist =
+  match plist with
+  | [] -> [[]]  (* Return a list with an empty trace if no processes are present *)
+  | pl :: _ ->  (* Focus only on the head of the list *)
+    match pl with
+    | NullProcess -> [[]]  (* NullProcess does nothing, so it contributes an empty trace *)
+    | _ -> traces pl  (* Compute traces for only the head process *)
+
+(* Function to compute traces of a single process *)
+and traces process =
+  match process with
+  | NullProcess -> [[]]  (* NullProcess does nothing, represents as an empty trace *)
+  | ActionProcess (action, next) ->
+    List.map (fun trace -> action :: trace) (traces_process_list next)  (* Append action to each trace from the next processes *)
+  | Parallel processes ->
+    List.flatten (List.map traces processes)  (* Combine traces from all parallel processes *)
+  | Choice (p1, p2) ->
+    traces p1 @ traces p2  (* Combine traces from both choice branches *)
+
 
 (* Definition of Equivalence Checker *)
 let equivalent p1 p2 =
