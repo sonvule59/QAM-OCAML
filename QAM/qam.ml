@@ -157,5 +157,32 @@ let rec evaluate_process = function
 let results = execute_process initial_process in
 print_results results
 
-(* type locations = 
-type success_rate =  *)
+(* IMPLEMENT the Parser
+    Utility function to trim whitespace from a string *)
+let trim str = 
+  let open String in
+  sub str (find_first_not_of " \t\n\r" str) 
+    ((find_last_not_of " \t\n\r" str) - (find_first_not_of " \t\n\r" str) + 1)
+
+(* Parse a single action from a string *)
+let parse_action input =
+  let parts = String.split_on_char ' ' (trim input) in
+  match parts with
+  | "send" :: rest -> Send (String.concat " " rest)
+  | "receive" :: rest -> Receive (String.concat " " rest)
+  | _ -> failwith "Unknown action"
+
+(* Recursive function to parse a process *)
+let rec parse_process input =
+  let input = trim input in
+  if String.sub input 0 6 = "choose" then
+    let inner = String.sub input 7 (String.length input - 8) in
+    let parts = String.split_on_char ',' inner in
+    if List.length parts <> 2 then failwith "Fail"
+    else Choice (parse_process (List.nth parts 0), parse_process (List.nth parts 1))
+  else
+    let actions = String.split_on_char ';' input in
+    List.fold_right (fun act acc ->
+      ActionProcess (parse_action act, acc)
+    ) actions NullProcess
+
