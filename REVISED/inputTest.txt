@@ -1,0 +1,4 @@
+{c<- a.q.R, a.q, c.o}
+{c-> (x).R, M} |[c.mu]| {c?(y).T, N}
+{c<- a.q.R, a.q, c.o}
+{c-> (x).R, M} |[c.mu]| {c?(y).T, N}
