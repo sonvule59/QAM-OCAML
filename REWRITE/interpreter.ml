@@ -1,3 +1,5 @@
+#load "parser.cmo"
+#load "lexer.cmo"
 open Ast
 open Lexing
 
