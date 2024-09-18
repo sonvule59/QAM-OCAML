@@ -1,20 +1,25 @@
-#load "parser.cmo"
-#load "lexer.cmo"
-open Ast
-open Lexing
+open Ast 
+open Lexer
+open Parser
+
+type msg = string
 
 let parse_with_error lexbuf =
-  try Parser.main lexbuf with
+  try 
+    Parser.main Lexer.token lexbuf 
+  with
   | Lexer.SyntaxError msg ->
-    Printf.fprintf stderr "%s%!" msg; exit (-1)
-  | Parser.Error ->
-    Printf.fprintf stderr "At offset %d: syntax error.\n%!" (Lexing.lexeme_start lexbuf);
+    Printf.fprintf stderr "%s%!" msg;
+    exit (-1)
+  | Parser.ParseError ->
+    Printf.fprintf stderr "Parse error at %s\n%!" (Lexing.lexeme lexbuf);
     exit (-1)
 
-(* Define the meet operation for combining resources *)
+(* Define the meet operation for resources *)
 let meet_operation (r1 : resource) (r2 : resource) : resource =
   MeetOperation (r1, r2)
 
+(* Logging function to print the membrane state *)
 let print_membrane_state (m : membrane) =
   match m with
   | NullMembrane -> print_endline "NullMembrane"
@@ -26,8 +31,8 @@ let print_membrane_state (m : membrane) =
     ) molecules
   | AirlockedMembrane (_, _, _) -> print_endline "AirlockedMembrane"
 
-(* Apply rules: ENCODE, DECODE, and COHERE *)
-let apply_rules (rule: string) (m : membrane) : membrane =
+(* Interpret function *)
+let rec interpret (rule: string) (m : membrane) : membrane =
   match rule with
   | "ENCODE" ->
     (match m with
@@ -104,17 +109,18 @@ let apply_rules (rule: string) (m : membrane) : membrane =
     | _ -> m)
   | _ -> failwith "Unknown rule"
 
-(* Combined equivalence checking function *)
-let check_all_equivalence_rules (m : membrane) : equivalence_result =
+let check_equivalence_rules (m : Ast.membrane)(p : Ast.process) : Ast.equivalence_result =
   let id1_rule (m: membrane) =
     match m with
     | MoleculeMembrane [] -> Equivalent
     | _ -> NotEquivalent "ID1 rule failed"
+    (* Maybe add an eval statement here???? *)
   in
-  let id2_rule (p: process) =
+  let rec id2_rule (p: process) =
     match p with
     | NullProcess -> Equivalent
     | _ -> NotEquivalent "ID2 rule failed"
+    (* Maybe add an eval statement here???? *)
   in
   let split_rule (m: membrane) =
     match m with
@@ -152,14 +158,14 @@ let check_all_equivalence_rules (m : membrane) : equivalence_result =
     | _ -> NotEquivalent "Com rule failed"
   in
 
-  let results = [
+  let rec results = [
     id1_rule m;
-    id2_rule m;
+    id2_rule p;
     split_rule m;
-    cl_rule m;
-    cr_rule m;
-    mt_rule m;
-    nt_rule m;
+    cl_rule p;
+    cr_rule p;
+    mt_rule p;
+    nt_rule p;
     decohere_rule m;
     com_rule m;
   ] in
@@ -172,12 +178,13 @@ let check_all_equivalence_rules (m : membrane) : equivalence_result =
 
 (* Main equivalence checker *)
 let check_equivalence (input: string) =
-  let lexbuf = from_string input in
+  let lexbuf = Lexing.from_string input in
   let membrane = parse_with_error lexbuf in
-  match check_all_equivalence_rules membrane with
+  match check_equivalence_rules membrane NullProcess with
   | Equivalent -> print_endline "Input is equivalent according to all rules."
   | NotEquivalent msg -> print_endline ("Not Equivalent: " ^ msg)
 
+(* Interactive interpreter *)
 let rec interactive_prompt (membrane : membrane) =
   print_endline "\nOptions:";
   print_endline "1. Enter a new process description";
@@ -201,17 +208,17 @@ let rec interactive_prompt (membrane : membrane) =
       | MoleculeMembrane m -> m
       | _ -> [])))
   | "2" ->
-    let updated_membrane = apply_rules "ENCODE" membrane in
+    let updated_membrane = interpret "ENCODE" membrane in
     print_endline "Updated membrane after applying ENCODE rule:";
     print_membrane_state updated_membrane;
     interactive_prompt updated_membrane
   | "3" ->
-    let updated_membrane = apply_rules "DECODE" membrane in
+    let updated_membrane = interpret "DECODE" membrane in
     print_endline "Updated membrane after applying DECODE rule:";
     print_membrane_state updated_membrane;
     interactive_prompt updated_membrane
   | "4" ->
-    let updated_membrane = apply_rules "COHERE" membrane in
+    let updated_membrane = interpret "COHERE" membrane in
     print_endline "Updated membrane after applying COHERE rule:";
     print_membrane_state updated_membrane;
     interactive_prompt updated_membrane
@@ -224,8 +231,10 @@ let rec interactive_prompt (membrane : membrane) =
     print_endline "Current membrane state:";
     print_membrane_state membrane;
     interactive_prompt membrane
-  | "7" -> (**Not yet done with this part *)
+  | "7" ->
     print_endline "Executing membrane...";
+    (* Here you should define the function execute_membrane if it exists in your logic. *)
+    (* execute_membrane membrane; *)
     print_endline "Execution complete.";
     interactive_prompt membrane
   | "8" -> print_endline "Exiting."
@@ -235,5 +244,5 @@ let rec interactive_prompt (membrane : membrane) =
 
 let () =
   print_endline "Welcome to the interactive interpreter!";
-  let initial_membrane = NullMembrane in
+  let initial_membrane = NullMembrane in 
   interactive_prompt initial_membrane
