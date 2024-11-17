@@ -1,0 +1,5 @@
+(executable
+ (name interpreter)
+ (modules ast lexer parser interpreter)
+ (libraries ounit2)
+)
