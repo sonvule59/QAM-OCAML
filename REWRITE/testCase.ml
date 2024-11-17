@@ -54,7 +54,7 @@ let test_check_resource_equivalence =
     let r2 = MeetOperation (SimpleResource NullResource, SimpleResource NullResource) in
     assert_equal false (check_resource_equivalence r1 r2)
   
-  let test_check_molecule_equivalence =
+let test_check_molecule_equivalence =
     let m1 = ProcessMolecule NullProcess in
     let m2 = ProcessMolecule NullProcess in
     assert_equal true (check_molecule_equivalence m1 m2);
