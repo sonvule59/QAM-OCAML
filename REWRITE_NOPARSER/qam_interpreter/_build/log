@@ -1,0 +1,85 @@
+# dune runtest
+# OCAMLPARAM: unset
+# Shared cache: disabled
+# Shared cache location: /Users/sonvu/.cache/dune/db
+# Workspace root: "/Users/sonvu/Documents/Son Vu/Research/Fall
+# 2024/OCAML/QAM/REVISED/QAM_REWRITE/qam_interpreter"
+# Auto-detected concurrency: 8
+# Dune context:
+#  { name = "default"
+#  ; kind = "default"
+#  ; profile = Dev
+#  ; merlin = true
+#  ; fdo_target_exe = None
+#  ; build_dir = In_build_dir "default"
+#  ; instrument_with = []
+#  }
+$ /Users/sonvu/.opam/5.1.0/bin/ocamlc.opt -config > /var/folders/yb/9hb4b8h13n17l35mjd3186780000gn/T/dune_26164b_output
+$ (cd _build/default && /Users/sonvu/.opam/5.1.0/bin/ocamlc.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -bin-annot -I lib/.qam_interpreter.objs/byte -no-alias-deps -opaque -o lib/.qam_interpreter.objs/byte/qam_interpreter.cmo -c -impl lib/qam_interpreter.ml)
+$ (cd _build/default && /Users/sonvu/.opam/5.1.0/bin/ocamlc.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -bin-annot -I test/.interpreter_tests.eobjs/byte -I /Users/sonvu/.opam/5.1.0/lib/ocaml/unix -I /Users/sonvu/.opam/5.1.0/lib/ounit2 -I /Users/sonvu/.opam/5.1.0/lib/ounit2/advanced -I /Users/sonvu/.opam/5.1.0/lib/seq -I /Users/sonvu/.opam/5.1.0/lib/stdlib-shims -I lib/.qam_interpreter.objs/byte -no-alias-deps -opaque -o test/.interpreter_tests.eobjs/byte/dune__exe__Interpreter_tests.cmo -c -impl test/interpreter_tests.ml)
+$ (cd _build/default && /Users/sonvu/.opam/5.1.0/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -I test/.interpreter_tests.eobjs/byte -I test/.interpreter_tests.eobjs/native -I /Users/sonvu/.opam/5.1.0/lib/ocaml/unix -I /Users/sonvu/.opam/5.1.0/lib/ounit2 -I /Users/sonvu/.opam/5.1.0/lib/ounit2/advanced -I /Users/sonvu/.opam/5.1.0/lib/seq -I /Users/sonvu/.opam/5.1.0/lib/stdlib-shims -I lib/.qam_interpreter.objs/byte -I lib/.qam_interpreter.objs/native -intf-suffix .ml -no-alias-deps -opaque -o test/.interpreter_tests.eobjs/native/dune__exe__Interpreter_tests.cmx -c -impl test/interpreter_tests.ml)
+$ (cd _build/default && /Users/sonvu/.opam/5.1.0/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -I lib/.qam_interpreter.objs/byte -I lib/.qam_interpreter.objs/native -intf-suffix .ml -no-alias-deps -opaque -o lib/.qam_interpreter.objs/native/qam_interpreter.cmx -c -impl lib/qam_interpreter.ml)
+$ (cd _build/default && /Users/sonvu/.opam/5.1.0/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -a -o lib/qam_interpreter.cmxa lib/.qam_interpreter.objs/native/qam_interpreter.cmx)
+$ (cd _build/default && /Users/sonvu/.opam/5.1.0/bin/ocamlopt.opt -w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence -strict-formats -short-paths -keep-locs -g -o test/interpreter_tests.exe /Users/sonvu/.opam/5.1.0/lib/ocaml/unix/unix.cmxa /Users/sonvu/.opam/5.1.0/lib/stdlib-shims/stdlib_shims.cmxa /Users/sonvu/.opam/5.1.0/lib/ounit2/advanced/oUnitAdvanced.cmxa /Users/sonvu/.opam/5.1.0/lib/ounit2/oUnit.cmxa lib/qam_interpreter.cmxa test/.interpreter_tests.eobjs/native/dune__exe__Interpreter_tests.cmx)
+> ld: warning: search path '/usr/local/lib' is not a directory
+$ (cd _build/default/test && ./interpreter_tests.exe)
+>
+> Running direct test for the interpreter...
+> New channel created: chan1
+> Encoding message on channel: chan1
+> Decoding message on channel: chan1
+> Null process. Execution complete.
+> ..Swapping entanglement between A and B
+> Swapped A to B
+> ..Found resource: CombinedResource(SimpleResource(Quantum(state)), Quantum(state_message))
+> FExecuting first branch of Choice.
+> New channel created: chan1
+> Null process. Execution complete.
+> Executing second branch of Choice.
+> New channel created: chan2
+> Null process. Execution complete.
+> .Executing replication.
+> New channel created: chan1
+> Null process. Execution complete.
+> Executing replication.
+> New channel created: chan1
+> Null process. Execution complete.
+> Executing replication.
+> New channel created: chan1
+> Null process. Execution complete.
+> Executing replication.
+> New channel created: chan1
+> Null process. Execution complete.
+> Executing replication.
+> New channel created: chan1
+> Null process. Execution complete.
+> Executing replication.
+> New channel created: chan1
+> Null process. Execution complete.
+> Executing replication.
+> New channel created: chan1
+> Null process. Execution complete.
+> Executing replication.
+> New channel created: chan1
+> Null process. Execution complete.
+> Executing replication.
+> New channel created: chan1
+> Null process. Execution complete.
+> Executing replication.
+> Reached replication limit. Stopping replication.
+> Reached replication limit. Stopping replication.
+> ..
+> ==============================================================================
+> Error: Interpreter Tests:4:test_quantum_teleportation.
+>
+> File "/Users/sonvu/Documents/Son Vu/Research/Fall 2024/OCAML/QAM/REVISED/QAM_REWRITE/qam_interpreter/_build/default/test/oUnit-Interpreter Tests-Sons-Air#01.log", line 11, characters 1-1:
+> Error: Interpreter Tests:4:test_quantum_teleportation (in the log).
+>
+> File "test/interpreter_tests.ml", line 85, characters 1-1:
+> Error: Interpreter Tests:4:test_quantum_teleportation (in the code).
+>
+> Quantum teleportation failed: quantum state not found in destination channel
+> ------------------------------------------------------------------------------
+> Ran: 8 tests in: 0.11 seconds.
+> FAILED: Cases: 8 Tried: 8 Errors: 0 Failures: 1 Skip:  0 Todo: 0 Timeouts: 0.
+[1]

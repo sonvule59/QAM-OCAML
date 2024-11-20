@@ -1,0 +1,4 @@
+(library
+ (name qam_interpreter)
+ (public_name qam_interpreter)
+ (modules qam_interpreter))

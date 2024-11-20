@@ -1,0 +1,12 @@
+(test
+ (name interpreter_tests)
+ (modules interpreter_tests)
+ (libraries ounit2 qam_interpreter))
+
+; (test
+;  (name test_ast)
+;  (libraries ounit2 qam_interpreter))
+
+; (test
+;  (name test_interpreter)
+;  (libraries ounit2 qam_interpreter))
