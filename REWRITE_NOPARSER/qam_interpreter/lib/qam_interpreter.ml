@@ -149,6 +149,65 @@ let enforce_no_cloning (membrane : membrane) =
 let entanglement_swap (membrane : membrane) (channel_a : string) (channel_b : string) =
   match membrane with
   | MoleculeMembrane molecules ->
+      (* Validate that both channels exist *)
+      let has_channel_a = List.exists (function
+        | ResourceMolecule (CombinedResource (_, Quantum q)) when q = channel_a -> true
+        | _ -> false) molecules in
+
+      let has_channel_b = List.exists (function
+        | ResourceMolecule (CombinedResource (_, Quantum q)) when q = channel_b -> true
+        | _ -> false) molecules in
+
+      if not has_channel_a || not has_channel_b then
+        failwith "Entanglement swap requires both channels to exist in the membrane";
+
+      (* QLocal: Localize channel `c` as a quantum message *)
+      let localized_molecules =
+        List.map (function
+          | ResourceMolecule (CombinedResource (SimpleResource _, Quantum q)) when q = channel_a ->
+              ResourceMolecule (CombinedResource (SimpleResource NullResource, Quantum (channel_a ^ ".◦")))
+          | other -> other) molecules
+      in
+
+      (* Encode: Encode `c.◦` into channel `d` *)
+      let encoded_molecules =
+        List.map (function
+          | ResourceMolecule (SimpleResource (Quantum q)) when q = channel_b ->
+              ResourceMolecule (CombinedResource (SimpleResource (Quantum channel_b), Quantum (channel_a ^ ".◦")))
+          | other -> other) localized_molecules
+      in
+      MoleculeMembrane encoded_molecules
+  | _ -> failwith "Entanglement swap requires a molecule membrane"
+
+
+
+    
+      (* Validate entanglement
+      let is_entangled = List.exists (function
+        | ResourceMolecule (CombinedResource (SimpleResource (Quantum q), Quantum entangled_q))
+          when (q = channel_a && entangled_q = channel_b) || (q = channel_b && entangled_q = channel_a) -> true
+        | _ -> false) molecules in
+
+      if not is_entangled then
+        failwith "No entanglement found between the specified channels";
+
+      (* Perform entanglement swap *)
+      print_endline ("Swapping entanglement between " ^ channel_a ^ " and " ^ channel_b);
+      let updated_molecules =
+        List.map (function
+          | ResourceMolecule (CombinedResource (SimpleResource _, Quantum q)) when q = channel_a ->
+              ResourceMolecule (CombinedResource (SimpleResource NullResource, Quantum channel_b))
+          | ResourceMolecule (CombinedResource (SimpleResource _, Quantum q)) when q = channel_b ->
+              ResourceMolecule (CombinedResource (SimpleResource NullResource, Quantum channel_a))
+          | other -> other)
+          molecules
+      in
+      MoleculeMembrane updated_molecules
+  | _ -> failwith "Entanglement swap requires a molecule membrane"
+   *)
+  (* let entanglement_swap (membrane : membrane) (channel_a : string) (channel_b : string) =
+  match membrane with
+  | MoleculeMembrane molecules ->
       print_endline ("Swapping entanglement between " ^ channel_a ^ " and " ^ channel_b);
       let molecules =
         List.map
@@ -160,7 +219,7 @@ let entanglement_swap (membrane : membrane) (channel_a : string) (channel_b : st
           molecules
       in
       MoleculeMembrane molecules
-  | _ -> failwith "Entanglement swap requires a molecule membrane"
+  | _ -> failwith "Entanglement swap requires a molecule membrane" *)
 
 let superdense_encode (membrane : membrane) (channel : string) (data : string) =
   encode_message channel (Quantum ("superdense:" ^ data)) membrane
@@ -172,11 +231,32 @@ let superdense_decode (membrane : membrane) (channel : string) =
   | _ -> failwith "Invalid superdense data" 
 
 let quantum_teleportation (membrane : membrane) (source : string) (destination : string) =
-  try
+  match membrane with
+  | MoleculeMembrane molecules  ->
+    let has_source = List.exists (function
+        | ResourceMolecule (CombinedResource (SimpleResource (Quantum q), _)) when q = source -> true
+        | _ -> false) molecules in
+
+      let has_destination = List.exists (function
+        | ResourceMolecule (SimpleResource (Quantum q)) when q = destination -> true
+        | _ -> false) molecules in
+
+      if not has_source then
+        failwith ("Quantum teleportation failed: No valid message found for decoding on channel: " ^ source);
+
+      if not has_destination then
+        failwith "Quantum teleportation failed: Destination channel not found";
+
+      (* Perform teleportation *)
+      let quantum_state = decode_message source membrane in
+      encode_message destination (Quantum quantum_state) membrane
+  | _ -> failwith "Quantum teleportation requires a molecule membrane"
+
+  (* try
     let quantum_state = decode_message source membrane in
     encode_message destination (Quantum quantum_state) membrane
   with Failure _ ->
-    failwith ("Quantum teleportation failed: No valid message found for decoding on channel: " ^ source)
+    failwith ("Quantum teleportation failed: No valid message found for decoding on channel: " ^ source) *)
 
 
 let interpret (proc : process) (membrane : membrane) =
@@ -254,6 +334,7 @@ let interpret (proc : process) (membrane : membrane) =
       interpret p membrane;
       interpret (Replication p) membrane *)
 
+(* Entry point for direct testing *)
 let example_membrane =
   MoleculeMembrane [
     ResourceMolecule (CombinedResource (SimpleResource (Quantum "chan1"), Quantum "quantum_data"))
