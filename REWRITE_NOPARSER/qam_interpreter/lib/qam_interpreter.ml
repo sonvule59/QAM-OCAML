@@ -254,7 +254,6 @@ let interpret (proc : process) (membrane : membrane) =
       interpret p membrane;
       interpret (Replication p) membrane *)
 
-(* Entry point for direct testing *)
 let example_membrane =
   MoleculeMembrane [
     ResourceMolecule (CombinedResource (SimpleResource (Quantum "chan1"), Quantum "quantum_data"))
