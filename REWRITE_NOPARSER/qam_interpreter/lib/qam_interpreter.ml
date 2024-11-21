@@ -34,7 +34,6 @@ type membrane =
   | MoleculeMembrane of molecule list
   | AirlockedMembrane of molecule list * resource * process
 
-(* Logic *)
 
 let meet_operation (r1 : resource) (r2 : resource) : resource =
   MeetOperation (r1, r2)
@@ -334,7 +333,6 @@ let interpret (proc : process) (membrane : membrane) =
       interpret p membrane;
       interpret (Replication p) membrane *)
 
-(* Entry point for direct testing *)
 let example_membrane =
   MoleculeMembrane [
     ResourceMolecule (CombinedResource (SimpleResource (Quantum "chan1"), Quantum "quantum_data"))
