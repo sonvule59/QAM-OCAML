@@ -75,7 +75,7 @@ let test_entanglement_swap_success _ =
       (Failure "No entanglement found between the specified channels")
       (fun () -> entanglement_swap membrane "A" "B")
 
-(* Example OUnit2 test case for QLocal transition *)
+(* Test case for QLocal transition *)
 let test_qes_localization _ =
   let membrane = MoleculeMembrane [
     ResourceMolecule (CombinedResource (SimpleResource NullResource, Quantum "c"));
@@ -173,7 +173,7 @@ let test_qes_transitions _ =
   | _ -> assert_failure "Invalid membrane state after entanglement swap" *)
 
 
-(* Debug function  *)
+(* Debug call  *)
 let rec string_of_resource = function
   | SimpleResource r -> "SimpleResource(" ^ string_of_resource r ^ ")"
   | NullResource -> "NullResource"
@@ -204,7 +204,7 @@ let rec string_of_resource = function
   | _ -> assert_failure "Invalid membrane state after quantum teleportation"
  *)
 
-(* Test: Successful quantum teleportation *)
+(* Test for Successful quantum teleportation *)
 let test_quantum_teleportation_success _ =
   let membrane = MoleculeMembrane [
     ResourceMolecule (CombinedResource (SimpleResource (Quantum "source_channel"), Quantum "state_to_teleport"));
@@ -227,7 +227,7 @@ let test_quantum_teleportation_success _ =
       assert_bool "Quantum teleportation failed: source channel not cleared" source_cleared
   | _ -> assert_failure "Invalid membrane state after quantum teleportation"
 
-(* Test: Missing source channel *)
+(* Missing source channel *)
 let test_quantum_teleportation_missing_source _ =
   let membrane = MoleculeMembrane [
     ResourceMolecule (CombinedResource (SimpleResource (Quantum "destination_channel"), ClassicalData ""))
@@ -289,7 +289,7 @@ let test_quantum_teleportation_missing_destination _ =
       assert_bool "Quantum teleportation failed" teleported
   | _ -> assert_failure "Invalid membrane state after teleportation" *)
 
-(* Test: Superdense Coding *)
+(* Test: Superdense Coding [NOT FULLY WORKING YET *)
 let test_superdense_coding _ =
   let membrane = MoleculeMembrane [
     ResourceMolecule (SimpleResource NullResource)
@@ -308,7 +308,7 @@ let test_choice_process _ =
   interpret process membrane;
   assert_bool "Choice process failed" true
 
-(* Test: Replication Process *)
+(* Replication Process *)
 let test_replication_process _ =
   let membrane = MoleculeMembrane [] in
   let process = Replication (ActionProcess (NewChannel "chan1", NullProcess)) in
