@@ -1,15 +1,14 @@
-(* {
-exception SyntaxError of string
-open Parser
-} *)
 {
-  open Parser  (* This should match the name of your parser module *)
+  open Parser
   exception SyntaxError of string
 }
 
-
 rule token = parse
-  | [' ' '\t' '\n' '\r'] { token lexbuf } (* Skip whitespace *)
+  | [' ' '\t' '\n' '\r'] { token lexbuf }
+  | "+"
+    { PLUS }
+  | "|[" { AIRLOCK_L }
+  | "]|" { AIRLOCK_R }
   | "{" { LBRACE }
   | "}" { RBRACE }
   | "," { COMMA }
@@ -22,7 +21,13 @@ rule token = parse
       match id with
       | "nu" -> NU
       | "o" -> O
+      | "repl" -> REP
       | _ -> IDENT id
     }
   | eof { EOF }
-  | _ { raise (SyntaxError "Unknown character") }
+  | _
+    {
+      raise
+        (SyntaxError
+           ("Unexpected character '" ^ Lexing.lexeme lexbuf ^ "'"))
+    }

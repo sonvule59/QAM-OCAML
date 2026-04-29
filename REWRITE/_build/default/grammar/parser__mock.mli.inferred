@@ -1,0 +1,29 @@
+type token =
+    RIGHTARROW
+  | REP
+  | RBRACE
+  | QUESTION
+  | PLUS
+  | O
+  | NU
+  | LEFTARROW
+  | LBRACE
+  | IDENT of string
+  | EOF
+  | DOT
+  | COMMA
+  | BANG
+  | AIRLOCK_R
+  | AIRLOCK_L
+val menhir_begin_marker : int
+val xv_resource : Ast.resource
+val xv_process : Ast.process
+val xv_prefix_process : Ast.process
+val xv_molecules : Ast.molecule list
+val xv_molecule : Ast.molecule
+val xv_membranes : Ast.membrane list
+val xv_membrane : Ast.membrane
+val xv_main : Ast.membrane list
+val xv_atomic_process : Ast.process
+val xv_action : Ast.action
+val menhir_end_marker : int

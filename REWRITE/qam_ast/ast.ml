@@ -1,11 +1,13 @@
+exception Parse_error
+
 type input = string
 type message = Quantum of input | ClassicalData of input
 
 type resource =
-  | SimpleResource of resource   (* alpha.mu *)
-  | NullResource               (* o *)
+  | SimpleResource of string     (* a named resource alpha *)
+  | NullResource                 (* o *)
   | CombinedResource of resource * message (* alpha.(mu1 o mu2) *)
-  | MeetOperation of resource * resource  (* mu1 o mu2 *)
+  | MeetOperation of resource * resource   (* mu1 o mu2 *)
 
 type action =
   | NewChannel of string                (* nu c. *)

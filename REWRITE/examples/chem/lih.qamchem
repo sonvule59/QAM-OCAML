@@ -1,0 +1,10 @@
+name LiH
+qubits 4
+ref -7.882
+term -7.4989469 I0
+term 0.171201 Z0
+term -0.222796 Z1
+term 0.120546 Z2
+term -0.100321 Z3
+term 0.06734 X0 X1
+term 0.05312 X2 X3

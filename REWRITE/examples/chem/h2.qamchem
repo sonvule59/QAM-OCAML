@@ -1,0 +1,8 @@
+name H2
+qubits 2
+ref -1.137
+term -1.0523732 I0
+term 0.3979374 Z0
+term -0.3979374 Z1
+term -0.0112801 Z0 Z1
+term 0.1809312 X0 X1

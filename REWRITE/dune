@@ -1,5 +1,20 @@
+(library
+ (name qam_rewrite)
+ (wrapped false)
+ (libraries grammar qam_ast)
+ (modules checkEquivalence interpreter chemistry))
+
 (executable
- (name interpreter)
- (modules ast lexer parser interpreter)
- (libraries ounit2)
-)
+ (name main)
+ (libraries qam_rewrite)
+ (modules main))
+
+(executable
+ (name chem_main)
+ (libraries qam_rewrite)
+ (modules chem_main))
+
+(test
+ (name testCase)
+ (modules testCase)
+ (libraries qam_rewrite ounit2))

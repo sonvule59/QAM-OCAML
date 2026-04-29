@@ -1,25 +1,24 @@
 %{
-open Ast
-exception ParseError 
+  open Ast
 %}
+
 %token <string> IDENT
-%token NU O
+%token NU O REP
 %token LBRACE RBRACE COMMA DOT BANG QUESTION LEFTARROW RIGHTARROW EOF
+%token PLUS AIRLOCK_L AIRLOCK_R
+
+%right REP
+%left PLUS
 
 %start main
+
 %type <Ast.membrane list> main
-%type <Ast.action> action
-%type <Ast.membrane> membrane
-%type <Ast.membrane list> membranes
-%type <Ast.molecule> molecule
-%type <Ast.molecule list> molecules
-%type <Ast.process> process
-%type <Ast.resource> resource
+
 %%
 
 main:
-  | membranes { $1 }
-  | error { raise (ParseError) }
+  | membranes EOF { $1 }
+  | error { raise Parse_error }
 
 membranes:
   | membrane { [$1] }
@@ -27,6 +26,7 @@ membranes:
 
 membrane:
   | LBRACE molecules RBRACE { MoleculeMembrane $2 }
+  | AIRLOCK_L membrane COMMA resource COMMA membrane AIRLOCK_R { AirlockedMembrane ($2, $4, $6) }
 
 molecules:
   | molecule { [$1] }
@@ -37,6 +37,14 @@ molecule:
   | resource { ResourceMolecule $1 }
 
 process:
+  | process PLUS prefix_process { Choice ($1, $3) }
+  | prefix_process { $1 }
+
+prefix_process:
+  | REP prefix_process { Replication $2 }
+  | atomic_process { $1 }
+
+atomic_process:
   | action DOT process { ActionProcess ($1, $3) }
   | action { ActionProcess ($1, NullProcess) }
 

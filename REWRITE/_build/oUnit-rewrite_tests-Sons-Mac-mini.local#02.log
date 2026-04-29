@@ -1,0 +1,12 @@
+2026-04-29T04:09:56+00:00 Sons-Mac-mini.local#02 I: Start test rewrite_tests:1:test_check_process_equivalence.
+2026-04-29T04:09:56+00:00 Sons-Mac-mini.local#02 I: Test rewrite_tests:1:test_check_process_equivalence is successful.
+2026-04-29T04:09:56+00:00 Sons-Mac-mini.local#02 I: End test rewrite_tests:1:test_check_process_equivalence.
+2026-04-29T04:09:56+00:00 Sons-Mac-mini.local#02 I: Start test rewrite_tests:3:test_check_membrane_equivalence.
+2026-04-29T04:09:56+00:00 Sons-Mac-mini.local#02 I: Test rewrite_tests:3:test_check_membrane_equivalence is successful.
+2026-04-29T04:09:56+00:00 Sons-Mac-mini.local#02 I: End test rewrite_tests:3:test_check_membrane_equivalence.
+2026-04-29T04:09:56+00:00 Sons-Mac-mini.local#02 I: Start test rewrite_tests:5:test_chem_dsl_parse.
+2026-04-29T04:09:56+00:00 Sons-Mac-mini.local#02 I: Test rewrite_tests:5:test_chem_dsl_parse is successful.
+2026-04-29T04:09:56+00:00 Sons-Mac-mini.local#02 I: End test rewrite_tests:5:test_chem_dsl_parse.
+2026-04-29T04:09:56+00:00 Sons-Mac-mini.local#02 I: Start test rewrite_tests:7:test_openqasm_export.
+2026-04-29T04:09:56+00:00 Sons-Mac-mini.local#02 I: Test rewrite_tests:7:test_openqasm_export is successful.
+2026-04-29T04:09:56+00:00 Sons-Mac-mini.local#02 I: End test rewrite_tests:7:test_openqasm_export.

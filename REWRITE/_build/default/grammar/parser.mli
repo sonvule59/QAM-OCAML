@@ -3,8 +3,10 @@
 
 type token = 
   | RIGHTARROW
+  | REP
   | RBRACE
   | QUESTION
+  | PLUS
   | O
   | NU
   | LEFTARROW
@@ -14,6 +16,8 @@ type token =
   | DOT
   | COMMA
   | BANG
+  | AIRLOCK_R
+  | AIRLOCK_L
 
 (* This exception is raised by the monolithic API functions. *)
 
