@@ -11,8 +11,8 @@ type resource =
 
 type action =
   | NewChannel of string                (* nu c. *)
-  | Send of string                      (* a!i. *)
-  | Receive of string                   (* delta?(x). *)
+  | Send of { chan : string; arg : string }     (* a!i. *)
+  | Receive of { chan : string; arg : string }  (* delta?(x). *)
   | LeftCombine of string               (* alpha <- k. encoding *)
   | RightCombine of string              (* c -> (x). decoding *)
 

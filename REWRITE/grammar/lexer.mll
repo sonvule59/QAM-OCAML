@@ -17,6 +17,8 @@ rule token = parse
   | "?" { QUESTION }
   | "<-" { LEFTARROW }
   | "->" { RIGHTARROW }
+  | "&" { AMP }
+  | "0" { ZERO }
   | ['a'-'z' 'A'-'Z' '_']['a'-'z' 'A'-'Z' '0'-'9' '_']* as id {
       match id with
       | "nu" -> NU

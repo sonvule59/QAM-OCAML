@@ -38,3 +38,46 @@ let rec check_membrane_equivalence (m1 : membrane) (m2 : membrane) : bool =
     check_resource_equivalence r1 r2 &&
     check_membrane_equivalence m12 m22
   | _ -> false
+
+(* ---- Phase 2: canonicalizer for the supported reducing fragment ----
+
+   [canonicalize] rewrites a (already-normalized) term into a canonical shape so
+   that structurally-different-but-equivalent terms compare equal. It implements
+   exactly two laws, plus a trivial cleanup:
+
+     A. Soup-as-multiset : molecule order in a MoleculeMembrane is irrelevant, so
+        sort by the total order [Stdlib.compare] (on canonicalized molecules).
+     B. Meet commutativity: (a & b) and (b & a) canonicalize identically.
+     C. Drop NullMolecule (it never arises from parsing/reduction, so this does
+        not affect Phase 1 golden normal forms, which use ProcessMolecule
+        NullProcess i.e. the printed "0", not NullMolecule).
+
+   OUT OF SCOPE (see README "Equivalence policy"): meet associativity flattening,
+   Choice commutativity, alpha-equivalence, bisimulation. *)
+let rec canon_resource (r : resource) : resource =
+  match r with
+  | SimpleResource _ | NullResource -> r
+  | CombinedResource (r1, m) -> CombinedResource (canon_resource r1, m)
+  | MeetOperation (r1, r2) ->
+    let a = canon_resource r1 and b = canon_resource r2 in
+    if compare a b <= 0 then MeetOperation (a, b) else MeetOperation (b, a)
+
+let canon_molecule (mol : molecule) : molecule =
+  match mol with
+  | ResourceMolecule r -> ResourceMolecule (canon_resource r)
+  | ProcessMolecule _ | NullMolecule -> mol
+
+let rec canonicalize (m : membrane) : membrane =
+  match m with
+  | NullMembrane -> NullMembrane
+  | MoleculeMembrane ms ->
+    let ms =
+      ms |> List.map canon_molecule |> List.filter (fun x -> x <> NullMolecule)
+    in
+    MoleculeMembrane (List.sort compare ms)
+  | AirlockedMembrane (l, r, rt) ->
+    AirlockedMembrane (canonicalize l, canon_resource r, canonicalize rt)
+
+(* Equivalence = structural walk over canonicalized terms. *)
+let equivalent (m1 : membrane) (m2 : membrane) : bool =
+  check_membrane_equivalence (canonicalize m1) (canonicalize m2)

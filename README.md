@@ -5,7 +5,7 @@ This is my project for Quantum Abstract Machines implementation in OCAML
 
 ## Repository tracks
 
-- `REWRITE/`: primary track with lexer/parser (`ocamllex` + `menhir`), AST, reduction interpreter, and structural equivalence utilities.
+- `REWRITE/`: primary track with lexer/parser (`ocamllex` + `menhir`), AST, reduction interpreter, and a normalize-then-canonicalize equivalence checker (see the [Equivalence policy](REWRITE/README.md#equivalence-policy)).
 - `REWRITE_NOPARSER/`: parallel semantics lab without a parser; useful for exploring standalone quantum operations.
 
 If you are evaluating "current compiler state," start with `REWRITE/` because it is the track where syntax, parsing, and execution are connected.

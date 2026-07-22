@@ -36,8 +36,8 @@ let before_substring (s : string) (needle : string) : string =
 let action_channel (action : action) : string =
   match action with
   | NewChannel c -> c
-  | Send s -> before_substring s "!"
-  | Receive s -> before_substring s "?"
+  | Send { chan; _ } -> chan
+  | Receive { chan; _ } -> chan
   | LeftCombine s -> before_substring s "<-"
   | RightCombine s -> before_substring s "->"
 
@@ -160,13 +160,53 @@ let interpret (rule : string) (m : membrane) : membrane =
   | "COHERE" -> (match reduce_cohere m with Some m' -> m' | None -> m)
   | _ -> failwith "Unknown rule"
 
+(* Choice: MVP internal-choice semantics. `P + Q` commits to the left branch.
+   Full left/right nondeterminism would require reduce_once to return multiple
+   successors (a set/list), which the membrane-option relation cannot express;
+   that is deferred. *)
+let reduce_choice (m : membrane) : membrane option =
+  match m with
+  | MoleculeMembrane molecules -> (
+      match
+        take_first
+          (function ProcessMolecule (Choice _) -> true | _ -> false)
+          [] molecules
+      with
+      | Some (ProcessMolecule (Choice (left, _right)), rest) ->
+          Some (MoleculeMembrane (ProcessMolecule left :: rest))
+      | _ -> None)
+  | _ -> None
+
+(* Replication: unfold `repl P` into `P | repl P`. This always grows the soup,
+   so it is bounded by the fuel in `normalize` rather than reaching a fixpoint. *)
+let reduce_replication (m : membrane) : membrane option =
+  match m with
+  | MoleculeMembrane molecules -> (
+      match
+        take_first
+          (function ProcessMolecule (Replication _) -> true | _ -> false)
+          [] molecules
+      with
+      | Some (ProcessMolecule (Replication p), rest) ->
+          Some
+            (MoleculeMembrane
+               (ProcessMolecule p :: ProcessMolecule (Replication p) :: rest))
+      | _ -> None)
+  | _ -> None
+
 let reduce_once (m : membrane) : membrane option =
   match reduce_encode m with
   | Some m' -> Some m'
   | None -> (
       match reduce_decode m with
       | Some m' -> Some m'
-      | None -> reduce_cohere m)
+      | None -> (
+          match reduce_cohere m with
+          | Some m' -> Some m'
+          | None -> (
+              match reduce_choice m with
+              | Some m' -> Some m'
+              | None -> reduce_replication m)))
 
 let normalize ?(fuel = 128) (m : membrane) : membrane =
   let rec loop steps current =
@@ -178,12 +218,53 @@ let normalize ?(fuel = 128) (m : membrane) : membrane =
   in
   loop fuel m
 
-let check_equivalence_between_membranes (m1 : membrane) (m2 : membrane) :
-    equivalence_result =
-  let n1 = normalize m1 in
-  let n2 = normalize m2 in
-  if CheckEquivalence.check_membrane_equivalence n1 n2 then Equivalent
-  else NotEquivalent "Normal forms differ."
+let string_of_message = function
+  | Quantum s -> "q:" ^ s
+  | ClassicalData s -> "c:" ^ s
+
+let string_of_action = function
+  | NewChannel c -> "nu " ^ c ^ "."
+  | Send { chan; arg } -> chan ^ "!" ^ arg ^ "."
+  | Receive { chan; arg } -> chan ^ "?" ^ arg ^ "."
+  | LeftCombine s -> s ^ "."
+  | RightCombine s -> s ^ "."
+
+let rec string_of_process = function
+  | NullProcess -> "0"
+  | ActionProcess (a, NullProcess) -> string_of_action a
+  | ActionProcess (a, p) -> string_of_action a ^ string_of_process p
+  | Choice (p, q) -> string_of_process p ^ " + " ^ string_of_process q
+  | Replication p -> "repl " ^ string_of_process p
+
+let rec string_of_resource = function
+  | SimpleResource s -> s
+  | NullResource -> "o"
+  | CombinedResource (r, m) -> string_of_resource r ^ ".(" ^ string_of_message m ^ ")"
+  | MeetOperation (r1, r2) -> string_of_resource r1 ^ " & " ^ string_of_resource r2
+
+let string_of_molecule = function
+  | NullMolecule -> "0"
+  | ProcessMolecule p -> string_of_process p
+  | ResourceMolecule r -> string_of_resource r
+
+let rec string_of_membrane = function
+  | NullMembrane -> "{}"
+  | MoleculeMembrane ms ->
+      "{ " ^ String.concat ", " (List.map string_of_molecule ms) ^ " }"
+  | AirlockedMembrane (l, r, rt) ->
+      "|[ " ^ string_of_membrane l ^ ", " ^ string_of_resource r ^ ", "
+      ^ string_of_membrane rt ^ " ]|"
+
+let print_membrane_state (m : membrane) = print_endline (string_of_membrane m)
+
+(* Phase 2 equivalence policy: normalize both sides (same fuel), canonicalize,
+   then structurally compare. See README "Equivalence policy". *)
+let check_equivalence_between_membranes ?(fuel = 128) (m1 : membrane)
+    (m2 : membrane) : equivalence_result =
+  let n1 = normalize ~fuel m1 in
+  let n2 = normalize ~fuel m2 in
+  if CheckEquivalence.equivalent n1 n2 then Equivalent
+  else NotEquivalent "Canonical normal forms differ."
 
 let print_parse_error = function
   | Lex_err msg -> Printf.printf "Lexer error: %s\n%!" msg
@@ -193,25 +274,21 @@ let equivalence_step (input : string) =
   match parse_membranes_from_string input with
   | Error e -> print_parse_error e
   | Ok [] -> print_endline "No membrane found in input."
-  | Ok [m] -> (
-      match check_equivalence_between_membranes m (normalize m) with
-      | Equivalent ->
-          print_endline
-            "Equivalent: membrane is stable up to normalization/evaluation."
-      | NotEquivalent msg -> print_endline ("Not equivalent: " ^ msg))
+  | Ok [m] ->
+      (* Single membrane: report whether it is already a normal form. We compare
+         m against normalize(m) canonically WITHOUT normalizing the left side, so
+         this is not the tautology "normalize m = normalize (normalize m)". *)
+      let nf = normalize m in
+      if CheckEquivalence.equivalent m nf then
+        print_endline "Already a normal form (stable under reduction)."
+      else
+        print_endline ("Not a normal form; reduces to: " ^ string_of_membrane nf)
   | Ok (m1 :: m2 :: _) -> (
       match check_equivalence_between_membranes m1 m2 with
       | Equivalent ->
           print_endline
-            "Equivalent: first two membranes reduce to the same normal form."
+            "Equivalent: membranes have the same canonical normal form."
       | NotEquivalent msg -> print_endline ("Not equivalent: " ^ msg))
-
-let print_membrane_state (m : membrane) =
-  match m with
-  | NullMembrane -> print_endline "NullMembrane"
-  | MoleculeMembrane molecules ->
-      Printf.printf "MoleculeMembrane(%d molecules)\n" (List.length molecules)
-  | AirlockedMembrane _ -> print_endline "AirlockedMembrane(...)"
 
 let print_system_state (membranes : membrane list) =
   if membranes = [] then print_endline "No membranes loaded."

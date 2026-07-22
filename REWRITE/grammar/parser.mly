@@ -3,12 +3,13 @@
 %}
 
 %token <string> IDENT
-%token NU O REP
+%token NU O REP ZERO
 %token LBRACE RBRACE COMMA DOT BANG QUESTION LEFTARROW RIGHTARROW EOF
-%token PLUS AIRLOCK_L AIRLOCK_R
+%token PLUS AIRLOCK_L AIRLOCK_R AMP
 
 %right REP
 %left PLUS
+%left AMP
 
 %start main
 
@@ -45,16 +46,21 @@ prefix_process:
   | atomic_process { $1 }
 
 atomic_process:
+  | ZERO { NullProcess }
   | action DOT process { ActionProcess ($1, $3) }
   | action { ActionProcess ($1, NullProcess) }
 
 resource:
+  | resource AMP resource { MeetOperation ($1, $3) }
+  | atomic_resource { $1 }
+
+atomic_resource:
   | IDENT { SimpleResource $1 }
   | O { NullResource }
 
 action:
   | NU IDENT DOT { NewChannel $2 }
-  | IDENT BANG IDENT DOT { Send ($1 ^ "!" ^ $3) }
-  | IDENT QUESTION IDENT DOT { Receive ($1 ^ "?" ^ $3) }
+  | IDENT BANG IDENT DOT { Send { chan = $1; arg = $3 } }
+  | IDENT QUESTION IDENT DOT { Receive { chan = $1; arg = $3 } }
   | IDENT LEFTARROW IDENT DOT { LeftCombine ($1 ^ "<-" ^ $3) }
   | IDENT RIGHTARROW IDENT DOT { RightCombine ($1 ^ "->" ^ $3) }

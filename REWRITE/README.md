@@ -57,13 +57,13 @@ Input is one or more membranes separated by commas.
 - **Replication**: `repl p` (`repl` binds tighter than `+`).
 - **Airlock membrane**: **`|[`** *left* **`,`** *resource* **`,`** *right* **`]|`** (close is `]` immediately followed by `|`).
 
-Primitives match the existing action forms: `nu c.`, `a!x.`, `b?y.`, `i<-j.`, `i->k.`, and resources `o` or identifiers.
+Primitives match the existing action forms: `nu c.`, `a!x.`, `b?y.`, `i<-j.`, `i->k.`, the null process `0`, and resources `o`, identifiers, or a **meet** `r & s` (`MeetOperation`, left-associative). The meet/`0` forms exist so a reduced term (e.g. ENCODE's output) round-trips back through the parser.
 
 ## Pipeline
 
 1. `grammar/lexer.mll` → tokens (including `+`, `repl`, `|[`, `]|`).
 2. `grammar/parser.mly` (`Menhir`) → `Ast.membrane list`.
-3. `interpreter.ml` applies reduction passes (`ENCODE`, `DECODE`, `COHERE`) and repeats them to approximate a normal form.
+3. `interpreter.ml` applies reduction passes (`ENCODE`, `DECODE`, `COHERE`, plus Choice and Replication) and repeats them (fuel-bounded) to approximate a normal form. `string_of_membrane` renders any term for the REPL.
 4. `checkEquivalence.ml` compares AST shapes; normalization-based “equivalence” uses structural equality of normal forms.
 
 ## Quantum chemistry track (minimal VQE)
@@ -97,24 +97,72 @@ term 0.1809312 X0 X1
 4. Built-in benchmark suite for `H2` and `LiH`.
 5. Convergence reporting (`final energy`, `reference`, `delta`, iterations).
 
-## Examples
+## Examples: parses vs. reduces
 
-Choice and replication parse as AST nodes (`Choice`, `Replication`):
+"Parses" = the grammar builds an AST. "Reduces" = `normalize` changes the term
+via a reduction rule. The two are **not** the same — some terms parse but are
+already normal forms.
 
-```text
-{ a!x. + b?y., o }
-```
+**Parse and reduce** (reduction regression is locked by `testCase.ml`; see
+[`examples/qam/README.md`](examples/qam/README.md) for the exact normal forms):
 
-```text
-{ repl nu c., o }
-```
+| Input | Rule | Normal form |
+|-------|------|-------------|
+| `{ a<-k., a }` | ENCODE | `{ 0, a & a }` |
+| `{ nu c., c!x. }` | COHERE | `{ 0, 0 }` |
+| `{ c->x., c?y. }` | DECODE | `{ 0, 0 }` |
+| `{ a!x. + b?y., o }` | Choice | `{ a!x., o }` (commits to left branch) |
+| `{ repl nu c., o }` | Replication | unfolds `repl P → P \| repl P`, bounded by fuel |
 
-Airlock parses to `Ast.AirlockedMembrane` when you write nested membranes explicitly:
+**Parses only** (a valid AST, but no rule fires — it is its own normal form):
 
 ```text
 |[ { nu z., o }, phi, { c?d. }]|
 ```
 
-## Caveats
+This airlock parses to `Ast.AirlockedMembrane`; the only cross-boundary rule is
+airlock DECODE (a `->` on the left meeting a matching `?` on the right), which
+this term does not trigger.
 
-Full bisimulation semantics are **not** implemented; “equivalence” here means **equal normal forms after the built-in reductions** on this AST subset.
+## Equivalence policy
+
+Equivalence is a **documented, test-locked policy for the supported reducing
+fragment**, not bisimulation.
+
+**Definition.** For membranes `m1`, `m2`:
+
+```
+m1 ≡ m2   iff   canon(normalize(m1))  =_struct  canon(normalize(m2))
+```
+
+- `normalize` (fuel 128) reduces both sides using ENCODE/DECODE/COHERE/Choice/Replication.
+- `canon` (`CheckEquivalence.canonicalize`) rewrites the normal form so that
+  irrelevant syntactic differences collapse.
+- `=_struct` is the structural walk `CheckEquivalence.check_membrane_equivalence`.
+- Both sides use the **same** fuel, so equivalence is not fuel-sensitive.
+
+**What canon normalizes (IN — we claim these):**
+
+- **Soup as multiset** — molecule order in a `MoleculeMembrane` is irrelevant
+  (`{ 0, a & a } ≡ { a & a, 0 }`).
+- **Meet commutativity** — `a & b ≡ b & a`.
+- **Reduce-then-equal** — terms with the same canonical normal form
+  (`{ nu c., c!x. } ≡ { 0, 0 }`, `{ a<-k., a } ≡ { 0, a & a }`).
+- **NullMolecule cleanup** — dropped (never produced by parse/reduction).
+
+**What it does NOT do (OUT — explicit non-claims):**
+
+- **Bisimulation / observational equivalence** — not implemented (Phase 5).
+- **Choice commutativity** — `p + q` is *not* `q + p`. Choice commits to the
+  left branch (MVP), so the two normalize to different terms and are reported
+  **NotEquivalent**. Locked by `test_not_equiv_choice_asymmetry`.
+- **Replication** — terms with live `repl` never reach a true fixpoint; they are
+  compared only as fuel-bounded approximations. Identical `repl` terms are
+  equivalent (same fuel); a `repl` term is **not** claimed equivalent to its
+  one-step unfold.
+- **Meet associativity flattening** — not performed; only binary commutativity.
+- **Airlocks** — compared structurally (children canonicalized); no new airlock
+  equivalence laws.
+- **Alpha-equivalence / binder renaming** — not implemented.
+
+See [`examples/qam/equiv.md`](examples/qam/equiv.md) for the worked ≡ / ≢ table.

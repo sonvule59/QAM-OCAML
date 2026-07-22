@@ -17,4 +17,5 @@
 (test
  (name testCase)
  (modules testCase)
+ (deps (glob_files examples/qam/*.qam))
  (libraries qam_rewrite ounit2))

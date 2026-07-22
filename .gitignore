@@ -1,0 +1,11 @@
+_build/
+*.cmo
+*.cmi
+*.cmx
+*.cma
+*.cmxa
+*.cmxs
+*.o
+*.a
+*.conflicts
+*.install
