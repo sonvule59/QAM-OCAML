@@ -1,13 +1,19 @@
 open Ast
 
-type parse_error = Lex_err of string | Parse_err
+type parse_error = Lex_err of string * string | Parse_err of string
+(* second component: "line L, column C" of the failure *)
+
+let position_string (lb : Lexing.lexbuf) : string =
+  let p = lb.Lexing.lex_curr_p in
+  Printf.sprintf "line %d, column %d" p.Lexing.pos_lnum
+    (p.Lexing.pos_cnum - p.Lexing.pos_bol + 1)
 
 let parse_membranes_from_lexbuf (lb : Lexing.lexbuf) :
     (membrane list, parse_error) result =
   try Ok (Parser.main Lexer.token lb) with
-  | Lexer.SyntaxError msg -> Error (Lex_err msg)
-  | Parser.Error -> Error Parse_err
-  | Ast.Parse_error -> Error Parse_err
+  | Lexer.SyntaxError msg -> Error (Lex_err (msg, position_string lb))
+  | Parser.Error -> Error (Parse_err (position_string lb))
+  | Ast.Parse_error -> Error (Parse_err (position_string lb))
 
 let parse_membranes_from_string (input : string) :
     (membrane list, parse_error) result =
@@ -267,8 +273,8 @@ let check_equivalence_between_membranes ?(fuel = 128) (m1 : membrane)
   else NotEquivalent "Canonical normal forms differ."
 
 let print_parse_error = function
-  | Lex_err msg -> Printf.printf "Lexer error: %s\n%!" msg
-  | Parse_err -> print_endline "Parse error."
+  | Lex_err (msg, pos) -> Printf.printf "Lexer error at %s: %s\n%!" pos msg
+  | Parse_err pos -> Printf.printf "Parse error at %s.\n%!" pos
 
 let equivalence_step (input : string) =
   match parse_membranes_from_string input with

@@ -8,4 +8,4 @@ if ! command -v dune >/dev/null 2>&1; then
 fi
 
 dune build
-exec dune exec -- main -- "$@"
+exec dune exec ./qam.exe -- "$@"

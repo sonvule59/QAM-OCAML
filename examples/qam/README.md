@@ -20,9 +20,9 @@ Notes:
 
 | File | Protocol (paper reference) | Compile with |
 |------|---------------------------|--------------|
-| `bitcommit.qam` | Bit-commitment (Example 1) | `dune exec ./main.exe -- --compile examples/qam/bitcommit.qam` |
-| `teleport.qam` | Quantum teleportation (Example 2) | `dune exec ./main.exe -- --compile examples/qam/teleport.qam` |
-| `superdense.qam` | Superdense coding (Example 21) | `dune exec ./main.exe -- --compile examples/qam/superdense.qam` |
+| `bitcommit.qam` | Bit-commitment (Example 1) | `qam compile examples/qam/bitcommit.qam` |
+| `teleport.qam` | Quantum teleportation (Example 2) | `qam compile examples/qam/teleport.qam` |
+| `superdense.qam` | Superdense coding (Example 21) | `qam compile examples/qam/superdense.qam` |
 
 Expected circuits are locked by `test_compile_bit_commitment`,
 `test_compile_teleportation`, and `test_compile_superdense` in

@@ -4,7 +4,8 @@
 }
 
 rule token = parse
-  | [' ' '\t' '\n' '\r'] { token lexbuf }
+  | '\n' { Lexing.new_line lexbuf; token lexbuf }
+  | [' ' '\t' '\r'] { token lexbuf }
   | "+"
     { PLUS }
   | "|[" { AIRLOCK_L }

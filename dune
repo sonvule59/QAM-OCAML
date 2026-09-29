@@ -1,3 +1,6 @@
+; archive/ holds the quarantined research lab and legacy sources; not built
+(dirs (:standard \ archive))
+
 (library
  (name qam_rewrite)
  (wrapped false)
@@ -5,9 +8,10 @@
  (modules checkEquivalence interpreter chemistry compile sim))
 
 (executable
- (name main)
- (libraries qam_rewrite)
- (modules main))
+ (name qam)
+ (public_name qam)
+ (libraries qam_rewrite grammar qam_ast)
+ (modules qam))
 
 (executable
  (name chem_main)
