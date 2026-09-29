@@ -59,12 +59,83 @@ Input is one or more membranes separated by commas.
 
 Primitives match the existing action forms: `nu c.`, `a!x.`, `b?y.`, `i<-j.`, `i->k.`, the null process `0`, and resources `o`, identifiers, or a **meet** `r & s` (`MeetOperation`, left-associative). The meet/`0` forms exist so a reduced term (e.g. ENCODE's output) round-trips back through the parser.
 
+**Action prefixes sequence** (each trailing `.` ends one prefix): `nu c.c->x.a!x.`
+is ν c, then decode, then classical send — the paper's `A R` form. Prefixing
+binds tighter than `+`, so `a!x.b?y. + c!z.` is `(a!x.b?y.) + (c!z.)`.
+
 ## Pipeline
 
 1. `grammar/lexer.mll` → tokens (including `+`, `repl`, `|[`, `]|`).
 2. `grammar/parser.mly` (`Menhir`) → `Ast.membrane list`.
 3. `interpreter.ml` applies reduction passes (`ENCODE`, `DECODE`, `COHERE`, plus Choice and Replication) and repeats them (fuel-bounded) to approximate a normal form. `string_of_membrane` renders any term for the REPL.
 4. `checkEquivalence.ml` compares AST shapes; normalization-based “equivalence” uses structural equality of normal forms.
+
+## Path B: compiling QAM to OpenQASM (`compile.ml`)
+
+`compile.ml` is a **backend** that lowers a QAM configuration (`Ast.membrane list`)
+to a circuit, following Li et al., *The Quantum Abstract Machine*
+(arXiv:2402.13469v1), Figure 13 / Appendix E. It is **syntax-directed** — it
+recurses on process/membrane structure and emits gates, independent of the
+reduction relation — so it does not depend on the reducer being complete.
+
+`Compile.compile_to_qasm : Ast.membrane list -> string` maps QAM actions to gates:
+
+| QAM action | Rule | Emitted |
+|------------|------|---------|
+| `nu c.` (left end of `c`) | C-CohereL | `h q[i]; cx q[i], q[j]` (Bell pair on the two parties' blanks) |
+| `nu c.` (right end) | C-CohereR | *(passive; no gates)* |
+| `c<-µ.` (µ a quantum resource) | Encode (Fig. 10 block) | `cx q[µ], q[i]; h q[µ]` — and remembers µ as `c`'s payload |
+| `c<-µ.` (µ a classical residue) | Recover (Fig. 10 block) | `if(xb==1) x q[i]; if(zb==1) z q[i];` |
+| `c<-µ.` (µ otherwise unknown) | classical input | declares `creg µ[1]` (input bit) + controlled X/Z — superdense's classical message |
+| `c->x.` (decode) | Decode (Fig. 10 block) | `measure q[channel] -> mk[0]` and, if `c` carries a payload, `measure q[payload] -> mk+1[0]`; binds `x` to the (X bit, Z bit) residue |
+| `c?y.` (receive) | C-Rev | synchronizer; on a quantum channel binds `y` to the channel, on a classical one to the sender's residue |
+| `a!x.` (classical send) | Com | comment (ordering); records `x`'s residue on channel `a` |
+
+**Layout (the paper's Σ, N = 1):** every resource molecule is one qubit;
+membrane regions are consecutive. Blank `o` resources are claimed, in order, by
+channel creation (the Cohere rule *requires* one blank per party — a missing
+blank is a compile error), and named resources are addressable encode messages.
+Each decode gets its own 1-bit creg `mk`.
+
+**Compile from the command line:**
+
+```bash
+dune exec ./main.exe -- --compile examples/qam/bitcommit.qam
+dune exec ./main.exe -- --compile examples/qam/teleport.qam
+dune exec ./main.exe -- --compile examples/qam/superdense.qam
+```
+
+Teleportation (paper Example 2, `examples/qam/teleport.qam`) lays out exactly as
+the paper's Appendix E (message `q[0]`, Alice's Bell half `q[1]`, Bob `q[2]`)
+and compiles to the textbook circuit: Bell pair → CNOT+H encode → two
+measurements → `X^m0 Z^m1` recovery on Bob. Superdense coding (Example 21,
+`examples/qam/superdense.qam`) compiles with its classical message as an input
+creg. Locked by `test_compile_bell_pair`, `test_compile_missing_blank`,
+`test_compile_bit_commitment`, `test_compile_teleportation`,
+`test_compile_superdense`.
+
+**Physical validation (`sim.ml`):** a minimal built-in statevector simulator for
+the emitted QASM subset — measurements *branch* the run (a branch's squared norm
+is its probability) and `if(creg==1)` gates apply per-branch. `dune test` checks
+that Cohere really produces the Bell state (`test_bell_simulates`) and that the
+compiled teleportation circuit reproduces the message state `α|0⟩+β|1⟩` on Bob's
+qubit in **every** measurement branch, each with probability 1/4
+(`test_teleport_simulates`).
+
+**Fidelity note (Fig. 13 vs Fig. 10):** encode/decode are lowered to the paper's
+*concrete* teleportation circuit (Figure 10: CNOT then H on the **message**
+qubit; measure both the channel qubit and the payload, giving separate X and Z
+correction bits). Figure 13's C-EncodeQ/C-DecodeQ as literally written (H on the
+*channel* qubit; measuring only the channel; a single classical bit) leaves the
+message entangled with Bob's qubit and does not reproduce teleportation on a
+statevector — the Fig. 10 lowering is the one that passes simulation.
+
+**Known MVP limits:** flat OpenQASM discards the QAM's locality/no-relocation
+guarantee (a faithful, concurrent-IR target is the future "(b)" backend);
+classical channels carry one residue and the sender's membrane must precede the
+receiver's (send/wait are linearized, no scheduler); `N = 1` qubit per message
+and one encode per channel; projective channels are resolved syntactically (a
+receive-bound name stands for its channel), not semantically.
 
 ## Quantum chemistry track (minimal VQE)
 

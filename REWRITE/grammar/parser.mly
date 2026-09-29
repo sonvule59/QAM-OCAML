@@ -47,8 +47,8 @@ prefix_process:
 
 atomic_process:
   | ZERO { NullProcess }
-  | action DOT process { ActionProcess ($1, $3) }
-  | action { ActionProcess ($1, NullProcess) }
+  | action DOT prefix_process { ActionProcess ($1, $3) }
+  | action DOT { ActionProcess ($1, NullProcess) }
 
 resource:
   | resource AMP resource { MeetOperation ($1, $3) }
@@ -59,8 +59,8 @@ atomic_resource:
   | O { NullResource }
 
 action:
-  | NU IDENT DOT { NewChannel $2 }
-  | IDENT BANG IDENT DOT { Send { chan = $1; arg = $3 } }
-  | IDENT QUESTION IDENT DOT { Receive { chan = $1; arg = $3 } }
-  | IDENT LEFTARROW IDENT DOT { LeftCombine ($1 ^ "<-" ^ $3) }
-  | IDENT RIGHTARROW IDENT DOT { RightCombine ($1 ^ "->" ^ $3) }
+  | NU IDENT { NewChannel $2 }
+  | IDENT BANG IDENT { Send { chan = $1; arg = $3 } }
+  | IDENT QUESTION IDENT { Receive { chan = $1; arg = $3 } }
+  | IDENT LEFTARROW IDENT { LeftCombine ($1 ^ "<-" ^ $3) }
+  | IDENT RIGHTARROW IDENT { RightCombine ($1 ^ "->" ^ $3) }

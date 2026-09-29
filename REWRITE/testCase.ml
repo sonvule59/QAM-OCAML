@@ -161,6 +161,130 @@ let test_not_equiv_repl_vs_unfold _ =
   assert_bool "repl not equivalent to its one-step unfold"
     (not (is_equiv "{ repl nu c., o }" "{ nu c., repl nu c., o }"))
 
+(* ---- Path B / target (a): QAM -> flat OpenQASM (Compile.compile_to_qasm) ---- *)
+let contains_sub s sub =
+  let sl = String.length s and bl = String.length sub in
+  let rec go i =
+    if i + bl > sl then false
+    else if String.sub s i bl = sub then true
+    else go (i + 1)
+  in
+  go 0
+
+let qasm_of_file path =
+  match parse_membranes_from_string (read_file path) with
+  | Ok cfg -> Compile.compile_to_qasm cfg
+  | Error _ -> assert_failure ("parse failed for " ^ path)
+
+(* Cohere: two membranes creating channel c (each holding a blank `o`, as the
+   paper's Cohere rule requires) compile to a Bell pair (C-CohereL/C-CohereR). *)
+let test_compile_bell_pair _ =
+  match parse_membranes_from_string "{ nu c., o }, { nu c., o }" with
+  | Ok cfg ->
+      let q = Compile.compile_to_qasm cfg in
+      assert_bool "qreg q[2]" (contains_sub q "qreg q[2];");
+      assert_bool "H on q[0]" (contains_sub q "h q[0];");
+      assert_bool "CX q[0],q[1]" (contains_sub q "cx q[0], q[1];")
+  | Error _ -> assert_failure "parse failed"
+
+(* The paper's Cohere rule requires a blank in each party; without one the
+   compiler refuses to fabricate a qubit. *)
+let test_compile_missing_blank _ =
+  match parse_membranes_from_string "{ nu c. }, { nu c. }" with
+  | Ok cfg ->
+      let q = Compile.compile_to_qasm cfg in
+      assert_bool "reports missing blank" (contains_sub q "// ERROR: channel c needs a blank")
+  | Error _ -> assert_failure "parse failed"
+
+(* Bit-commitment (paper Example 1), now written in surface syntax thanks to
+   action-prefix sequencing: Alice = nu c.c->x. ; Bob = nu c.c?y. *)
+let test_compile_bit_commitment _ =
+  let q = qasm_of_file "examples/qam/bitcommit.qam" in
+  assert_bool "OPENQASM header" (String.starts_with ~prefix:"OPENQASM 2.0;" q);
+  assert_bool "Bell H" (contains_sub q "h q[0];");
+  assert_bool "Bell CX" (contains_sub q "cx q[0], q[1];");
+  assert_bool "Alice decode measures q[0]" (contains_sub q "measure q[0] -> m0[0];")
+
+(* Quantum teleportation (paper Example 2). Layout matches the paper's
+   Appendix E: message q[0], Alice's Bell half q[1], Bob's q[2]. Encode/decode
+   are lowered to the paper's concrete Figure 10 circuit. *)
+let test_compile_teleportation _ =
+  let q = qasm_of_file "examples/qam/teleport.qam" in
+  assert_bool "3 qubits" (contains_sub q "qreg q[3];");
+  assert_bool "Bell pair q[1],q[2]" (contains_sub q "cx q[1], q[2];");
+  assert_bool "encode CNOT msg->channel" (contains_sub q "cx q[0], q[1];");
+  assert_bool "encode H on message" (contains_sub q "h q[0];");
+  assert_bool "decode measures channel" (contains_sub q "measure q[1] -> m0[0];");
+  assert_bool "decode measures payload" (contains_sub q "measure q[0] -> m1[0];");
+  assert_bool "X correction on Bob" (contains_sub q "if(m0==1) x q[2];");
+  assert_bool "Z correction on Bob" (contains_sub q "if(m1==1) z q[2];")
+
+(* Superdense coding (paper Example 21): the classical message becomes a 1-bit
+   input creg; Bob recovers via classically-controlled corrections. *)
+let test_compile_superdense _ =
+  let q = qasm_of_file "examples/qam/superdense.qam" in
+  assert_bool "classical input creg" (contains_sub q "creg i[1];");
+  assert_bool "Bell pair" (contains_sub q "cx q[0], q[1];");
+  assert_bool "input-controlled X" (contains_sub q "if(i==1) x q[0];");
+  assert_bool "input-controlled Z" (contains_sub q "if(i==1) z q[0];");
+  assert_bool "decode" (contains_sub q "measure q[0] -> m0[0];");
+  assert_bool "Bob X correction" (contains_sub q "if(m0==1) x q[1];")
+
+(* ---- Physical validation: built-in statevector simulation (sim.ml) ---- *)
+
+(* Cohere alone must produce the Bell state (|00> + |11>)/sqrt2. *)
+let test_bell_simulates _ =
+  match parse_membranes_from_string "{ nu c., o }, { nu c., o }" with
+  | Ok cfg -> (
+      match Sim.run (Compile.compile_to_qasm cfg) with
+      | [ br ] ->
+          let s = 1.0 /. sqrt 2.0 in
+          let close c v =
+            Float.abs (c.Complex.re -. v) < 1e-9 && Float.abs c.Complex.im < 1e-9
+          in
+          assert_bool "amp |00>" (close br.Sim.amp.(0) s);
+          assert_bool "amp |11>" (close br.Sim.amp.(3) s);
+          assert_bool "amp |01>,|10> zero"
+            (Complex.norm br.Sim.amp.(1) < 1e-9 && Complex.norm br.Sim.amp.(2) < 1e-9)
+      | _ -> assert_failure "expected exactly one branch (no measurement)")
+  | Error _ -> assert_failure "parse failed"
+
+(* The compiled teleportation circuit must reproduce the message state
+   alpha|0> + beta|1> on Bob's qubit in EVERY measurement branch, each branch
+   with probability 1/4. This is the end-to-end physical correctness check. *)
+let test_teleport_simulates _ =
+  let qasm = qasm_of_file "examples/qam/teleport.qam" in
+  let alpha = 0.6 and beta = 0.8 in
+  let branches =
+    Sim.run
+      ~init0:({ Complex.re = alpha; im = 0.0 }, { Complex.re = beta; im = 0.0 })
+      qasm
+  in
+  assert_equal ~printer:string_of_int 4 (List.length branches);
+  List.iter
+    (fun br ->
+      (* m1 holds q0's bit, m0 holds q1's bit; Bob is q2 (bit value 4) *)
+      let bit r = match List.assoc_opt r br.Sim.cregs with Some v -> v | None -> 0 in
+      let base = bit "m1" + (2 * bit "m0") in
+      let a0 = br.Sim.amp.(base) and a1 = br.Sim.amp.(base + 4) in
+      let p = Complex.norm2 a0 +. Complex.norm2 a1 in
+      assert_bool "branch probability 1/4" (Float.abs (p -. 0.25) < 1e-9);
+      let cross =
+        Complex.sub
+          (Complex.mul a0 { Complex.re = beta; im = 0.0 })
+          (Complex.mul a1 { Complex.re = alpha; im = 0.0 })
+      in
+      assert_bool "Bob's qubit carries the message state" (Complex.norm cross < 1e-9))
+    branches
+
+(* Action-prefix sequencing regression (grammar). *)
+let test_parser_sequencing _ =
+  match parse_membranes_from_string "{ nu c.c<-d.c->x.a!x., d, o }" with
+  | Ok [ m ] ->
+      assert_equal ~printer:(fun s -> s) "{ nu c.c<-d.c->x.a!x., d, o }"
+        (string_of_membrane m)
+  | _ -> assert_failure "sequenced prefixes failed to parse"
+
 let test_chem_dsl_parse _ =
   let dsl =
     String.concat "\n"
@@ -225,6 +349,14 @@ let suite =
          "test_not_equiv_airlock_diff" >:: test_not_equiv_airlock_diff;
          "test_equiv_repl_identical" >:: test_equiv_repl_identical;
          "test_not_equiv_repl_vs_unfold" >:: test_not_equiv_repl_vs_unfold;
+         "test_compile_bell_pair" >:: test_compile_bell_pair;
+         "test_compile_missing_blank" >:: test_compile_missing_blank;
+         "test_compile_bit_commitment" >:: test_compile_bit_commitment;
+         "test_compile_teleportation" >:: test_compile_teleportation;
+         "test_compile_superdense" >:: test_compile_superdense;
+         "test_bell_simulates" >:: test_bell_simulates;
+         "test_teleport_simulates" >:: test_teleport_simulates;
+         "test_parser_sequencing" >:: test_parser_sequencing;
          "test_chem_dsl_parse" >:: test_chem_dsl_parse;
          "test_vqe_loop_decreases_energy" >:: test_vqe_loop_decreases_energy;
          "test_openqasm_export" >:: test_openqasm_export;

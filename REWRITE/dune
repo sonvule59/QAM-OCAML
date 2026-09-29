@@ -2,7 +2,7 @@
  (name qam_rewrite)
  (wrapped false)
  (libraries grammar qam_ast)
- (modules checkEquivalence interpreter chemistry))
+ (modules checkEquivalence interpreter chemistry compile sim))
 
 (executable
  (name main)
