@@ -32,15 +32,6 @@ open Ast
    - only top-level MoleculeMembranes contribute gates.
    ========================================================================== *)
 
-let suffix_after (s : string) (sep : string) : string =
-  let sl = String.length s and nl = String.length sep in
-  let rec go i =
-    if i + nl > sl then s
-    else if String.sub s i nl = sep then String.sub s (i + nl) (sl - i - nl)
-    else go (i + 1)
-  in
-  go 0
-
 let membrane_processes = function
   | MoleculeMembrane ms ->
       List.filter_map (function ProcessMolecule p -> Some p | _ -> None) ms
@@ -53,8 +44,8 @@ let membrane_resources = function
 
 (* Channel names a process creates via `nu c.` (both parties run it). *)
 let rec created_channels = function
-  | NullProcess -> []
-  | ActionProcess (NewChannel c, k) -> c :: created_channels k
+  | NullProcess | ProcessRef _ -> []
+  | ActionProcess ({ act = NewChannel c; _ }, k) -> c :: created_channels k
   | ActionProcess (_, k) -> created_channels k
   | Choice (a, b) -> created_channels a @ created_channels b
   | Replication r -> created_channels r
@@ -84,7 +75,7 @@ let build_layout (membranes : membrane list) =
           match r with
           | NullResource -> Queue.add idx q
           | SimpleResource name -> Hashtbl.replace named (i, name) idx
-          | CombinedResource _ | MeetOperation _ ->
+          | ChannelParty _ | CombinedResource _ | MeetOperation _ ->
               () (* occupies a qubit, not addressable by name *))
         (membrane_resources m))
     membranes;
@@ -120,152 +111,210 @@ let channel_qubit parties c g =
   | Some pt when pt.rmem = Some g -> pt.rqubit
   | _ -> None
 
-let compile_to_qasm (membranes : membrane list) : string =
+(* ============================================================================
+   Lowering (Phase 3): QAM configuration -> Ir.circuit.
+
+   Each membrane lowers to its own instruction list with classical send/wait
+   as first-class IR; Ir.to_qasm then schedules, optimizes and emits.
+
+   Classical dataflow is linked by FIXPOINT: lowering rounds repeat while the
+   classical-channel table still grows, so a receiver membrane may precede its
+   sender in the configuration (the old "sender first" restriction is gone).
+   Unservable waits are reported as deadlocks by the scheduler.
+   ========================================================================== *)
+
+(* lower a configuration to the circuit IR (shared by every backend) *)
+let lower (membranes : membrane list) : Ir.circuit =
   let nqubits, named, parties = build_layout membranes in
-  let body = Buffer.create 512 in
-  (* creg declarations in first-use order: (name, trailing comment) *)
-  let cregs : (string * string) list ref = ref [] in
-  let declare_creg ?(comment = "") name =
-    if not (List.mem_assoc name !cregs) then cregs := !cregs @ [ (name, comment) ]
+  (* each membrane's Sigma region: one slot per resource molecule, sequential *)
+  let regions =
+    let next = ref 0 in
+    List.mapi
+      (fun i m ->
+        let n = List.length (membrane_resources m) in
+        let r = List.init n (fun k -> !next + k) in
+        next := !next + n;
+        (i, r))
+      membranes
   in
-  let fresh = ref 0 in
-  let fresh_creg () =
-    let r = Printf.sprintf "m%d" !fresh in
-    incr fresh;
-    declare_creg r;
-    r
-  in
-  (* channel -> qubit of the quantum message encoded onto it (Fig. 10 payload) *)
-  let payload : (string, int) Hashtbl.t = Hashtbl.create 8 in
-  (* classical channel -> residue cregs (X bit, optional Z bit) last sent on it *)
+  (* classical channel -> residue cregs (X bit, optional Z bit); persists
+     across lowering rounds so receiver-before-sender resolves next round *)
   let classical : (string, string * string option) Hashtbl.t = Hashtbl.create 8 in
-  (* env binds receive/decode-bound names in the current process:
-     `Chan c        — the name stands for (a party of) quantum channel c
-     `Res (xb, zb)  — a classical residue: X-correction bit, optional Z bit *)
   let resolve_chan env name =
     match List.assoc_opt name env with Some (`Chan c) -> c | _ -> name
   in
-  let rec emit g (env : (string * [ `Chan of string | `Res of string * string option ]) list) p =
-    match p with
-    | NullProcess -> ()
-    | ActionProcess (NewChannel c, k) ->
-        (match Hashtbl.find_opt parties c with
-        | Some pt when pt.lmem = g -> (
-            match (pt.lqubit, pt.rqubit) with
-            | Some i, Some j ->
-                (* C-CohereL: Bell pair across the two parties' blanks *)
-                Printf.bprintf body "h q[%d];\n" i;
-                Printf.bprintf body "cx q[%d], q[%d];\n" i j
-            | _ ->
-                Printf.bprintf body
-                  "// ERROR: channel %s needs a blank 'o' in each of its two membranes (Cohere)\n"
-                  c)
-        | Some _ -> () (* C-CohereR: passive right end *)
-        | None -> ());
-        emit g env k
-    | ActionProcess (LeftCombine s, k) ->
-        let chan = resolve_chan env (Interpreter.action_channel (LeftCombine s)) in
-        let msg = suffix_after s "<-" in
-        (match channel_qubit parties chan g with
-        | None ->
-            Printf.bprintf body "// ERROR: encode on %s: no channel party in this membrane\n" chan
-        | Some i -> (
-            (* resolve the message: classical residue, named quantum resource,
-               a channel party used as quantum message (entanglement swap), or
-               an otherwise-unknown name, treated as a classical input bit *)
-            let msg_val =
-              match List.assoc_opt msg env with
-              | Some (`Res (xb, zb)) -> `Classical (xb, zb)
-              | Some (`Chan c') -> (
-                  match channel_qubit parties c' g with
-                  | Some mq -> `Quantum mq
-                  | None -> `Unresolved)
-              | None -> (
-                  match Hashtbl.find_opt named (g, msg) with
-                  | Some mq -> `Quantum mq
-                  | None -> (
-                      match channel_qubit parties msg g with
-                      | Some mq -> `Quantum mq
-                      | None -> `Input))
-            in
-            match msg_val with
-            | `Quantum mq ->
-                (* Encode block, Fig. 10: CNOT message -> channel, then H message.
-                   Remember the payload so decode measures it for the Z bit. *)
-                Printf.bprintf body "cx q[%d], q[%d];\n" mq i;
-                Printf.bprintf body "h q[%d];\n" mq;
-                Hashtbl.replace payload chan mq
-            | `Classical (xb, zb) ->
-                (* Recover block, Fig. 10: X by the channel bit, Z by the payload bit *)
-                let zbit = match zb with Some z -> z | None -> xb in
-                Printf.bprintf body "if(%s==1) x q[%d];\n" xb i;
-                Printf.bprintf body "if(%s==1) z q[%d];\n" zbit i
-            | `Input ->
-                (* classical message literal (superdense coding): a 1-bit input *)
-                declare_creg ~comment:" // classical input bit" msg;
-                Printf.bprintf body "if(%s==1) x q[%d];\n" msg i;
-                Printf.bprintf body "if(%s==1) z q[%d];\n" msg i
-            | `Unresolved ->
-                Printf.bprintf body "// ERROR: encode on %s: unknown message %s\n" chan msg));
-        emit g env k
-    | ActionProcess (RightCombine s, k) ->
-        (* Decode block, Fig. 10: measure the channel qubit (X bit) and, if a
-           message was encoded, the payload qubit (Z bit); bind the residue *)
-        let chan = resolve_chan env (Interpreter.action_channel (RightCombine s)) in
-        let binder = suffix_after s "->" in
-        (match channel_qubit parties chan g with
-        | Some i ->
-            let xb = fresh_creg () in
-            Printf.bprintf body "measure q[%d] -> %s[0]; // decode channel %s\n" i xb chan;
-            let zb =
-              match Hashtbl.find_opt payload chan with
-              | Some mq ->
-                  let z = fresh_creg () in
-                  Printf.bprintf body "measure q[%d] -> %s[0]; // decode %s payload\n" mq z chan;
-                  Some z
-              | None -> None
-            in
-            emit g ((binder, `Res (xb, zb)) :: env) k
-        | None ->
-            Printf.bprintf body "// ERROR: decode on %s: no channel party in this membrane\n" chan;
-            emit g env k)
-    | ActionProcess (Send { chan; arg }, k) ->
-        (* Com: classical send; record which residue travels on this channel *)
-        let chan = resolve_chan env chan in
-        (match List.assoc_opt arg env with
-        | Some (`Res r) -> Hashtbl.replace classical chan r
-        | _ -> ());
-        Printf.bprintf body "// classical send of %s on channel %s\n" arg chan;
-        emit g env k
-    | ActionProcess (Receive { chan; arg }, k) ->
-        (* C-Rev: synchronizer. On a quantum channel the binder stands for the
-           channel (projective-channel notification); on a classical channel it
-           stands for the residue the sender recorded. *)
-        let chan = resolve_chan env chan in
-        let env' =
-          if Hashtbl.mem parties chan then (
-            Printf.bprintf body "// wait on quantum channel %s (decode notification)\n" chan;
-            (arg, `Chan chan) :: env)
-          else
-            match Hashtbl.find_opt classical chan with
-            | Some ((xb, _) as r) ->
-                Printf.bprintf body "// receive %s := %s (classical channel %s)\n" arg xb chan;
-                (arg, `Res r) :: env
+  let lower_round () =
+    let cregs : (string * string) list ref = ref [] in
+    let declare_creg ?(comment = "") name =
+      if not (List.mem_assoc name !cregs) then cregs := !cregs @ [ (name, comment) ]
+    in
+    let fresh = ref 0 in
+    let fresh_creg () =
+      let r = Printf.sprintf "m%d" !fresh in
+      incr fresh;
+      declare_creg r;
+      r
+    in
+    (* channel -> qubit of the quantum message encoded onto it (payload) *)
+    let payload : (string, int) Hashtbl.t = Hashtbl.create 8 in
+    let lower_membrane g m =
+      let out = ref [] in
+      let push i = out := i :: !out in
+      let rec emit (env : (string * [ `Chan of string | `Res of string * string option ]) list) p =
+        match p with
+        | NullProcess -> ()
+        | ActionProcess ({ act = NewChannel c; _ }, k) ->
+            (match Hashtbl.find_opt parties c with
+            | Some pt when pt.lmem = g -> (
+                match (pt.lqubit, pt.rqubit) with
+                | Some i, Some j ->
+                    push (Ir.H i);
+                    push (Ir.CX (i, j))
+                | _ ->
+                    push
+                      (Ir.Note
+                         (Printf.sprintf
+                            "ERROR: channel %s needs a blank 'o' in each of its two membranes (Cohere)"
+                            c)))
+            | Some _ -> () (* passive right end *)
+            | None -> ());
+            emit env k
+        | ActionProcess ({ act = Encode { chan; msg = msg_ast }; _ }, k) ->
+            let chan = resolve_chan env chan in
+            (match channel_qubit parties chan g with
             | None ->
-                Printf.bprintf body "// wait on channel %s (synchronizer)\n" chan;
-                env
-        in
-        emit g env' k
-    | Choice (l, _r) -> emit g env l (* commit-left, matching the reducer (CL) *)
-    | Replication r -> emit g env r (* one local copy (MT, bounded) *)
+                push
+                  (Ir.Note
+                     (Printf.sprintf "ERROR: encode on %s: no channel party in this membrane" chan))
+            | Some i -> (
+                let msg = match msg_ast with Named n -> n | m -> Interpreter.string_of_msg m in
+                let msg_val =
+                  match msg_ast with
+                  | Blank | Channeled _ | Projected _ | Residue _ | Meet _ -> `Unresolved
+                  | Named _ -> (
+                      match List.assoc_opt msg env with
+                      | Some (`Res (xb, zb)) -> `Classical (xb, zb)
+                      | Some (`Chan c') -> (
+                          match channel_qubit parties c' g with
+                          | Some mq -> `Quantum mq
+                          | None -> `Unresolved)
+                      | None -> (
+                          match Hashtbl.find_opt named (g, msg) with
+                          | Some mq -> `Quantum mq
+                          | None -> (
+                              match channel_qubit parties msg g with
+                              | Some mq -> `Quantum mq
+                              | None -> `Input)))
+                in
+                match msg_val with
+                | `Quantum mq ->
+                    (* Encode block, Fig. 10: CNOT message -> channel, H message *)
+                    push (Ir.CX (mq, i));
+                    push (Ir.H mq);
+                    Hashtbl.replace payload chan mq
+                | `Classical (xb, zb) ->
+                    let zbit = match zb with Some z -> z | None -> xb in
+                    push (Ir.CtrlX { c = xb; q = i });
+                    push (Ir.CtrlZ { c = zbit; q = i })
+                | `Input ->
+                    declare_creg ~comment:" // classical input bit" msg;
+                    push (Ir.CtrlX { c = msg; q = i });
+                    push (Ir.CtrlZ { c = msg; q = i })
+                | `Unresolved ->
+                    push
+                      (Ir.Note
+                         (Printf.sprintf "ERROR: encode on %s: unknown message %s" chan msg))));
+            emit env k
+        | ActionProcess ({ act = Decode { chan; binder }; _ }, k) -> (
+            let chan = resolve_chan env chan in
+            match channel_qubit parties chan g with
+            | Some i ->
+                let xb = fresh_creg () in
+                push
+                  (Ir.Measure
+                     { q = i; c = xb; note = Printf.sprintf " // decode channel %s" chan });
+                let zb =
+                  match Hashtbl.find_opt payload chan with
+                  | Some mq ->
+                      let z = fresh_creg () in
+                      push
+                        (Ir.Measure
+                           { q = mq; c = z; note = Printf.sprintf " // decode %s payload" chan });
+                      Some z
+                  | None -> None
+                in
+                push
+                  (Ir.SendC
+                     { chan; desc = Printf.sprintf "decode notification on channel %s" chan });
+                emit ((binder, `Res (xb, zb)) :: env) k
+            | None ->
+                push
+                  (Ir.Note
+                     (Printf.sprintf "ERROR: decode on %s: no channel party in this membrane" chan));
+                emit env k)
+        | ActionProcess ({ act = Send { chan; arg }; _ }, k) ->
+            let chan = resolve_chan env chan in
+            (match arg with
+            | Named n -> (
+                match List.assoc_opt n env with
+                | Some (`Res r) -> Hashtbl.replace classical chan r
+                | _ -> ())
+            | _ -> ());
+            push
+              (Ir.SendC
+                 {
+                   chan;
+                   desc =
+                     Printf.sprintf "classical send of %s on channel %s"
+                       (Interpreter.string_of_msg arg) chan;
+                 });
+            emit env k
+        | ActionProcess ({ act = Receive { chan; arg }; _ }, k) ->
+            let chan = resolve_chan env chan in
+            if Hashtbl.mem parties chan then begin
+              push
+                (Ir.WaitC
+                   {
+                     chan;
+                     desc =
+                       Printf.sprintf "wait on quantum channel %s (decode notification)" chan;
+                   });
+              emit ((arg, `Chan chan) :: env) k
+            end
+            else begin
+              match Hashtbl.find_opt classical chan with
+              | Some ((xb, _) as r) ->
+                  push
+                    (Ir.WaitC
+                       {
+                         chan;
+                         desc =
+                           Printf.sprintf "receive %s := %s (classical channel %s)" arg xb chan;
+                       });
+                  emit ((arg, `Res r) :: env) k
+              | None ->
+                  push
+                    (Ir.WaitC
+                       { chan; desc = Printf.sprintf "wait on channel %s (synchronizer)" chan });
+                  emit env k
+            end
+        | Choice (l, _r) -> emit env l (* codegen commits left; the machine explores both *)
+        | Replication r -> emit env r (* one local copy *)
+        | ProcessRef n ->
+            push (Ir.Note (Printf.sprintf "ERROR: unresolved process reference %s" n))
+      in
+      List.iter (emit []) (membrane_processes m);
+      List.rev !out
+    in
+    let procs = List.mapi (fun i m -> { Ir.mem = i; body = lower_membrane i m }) membranes in
+    { Ir.nqubits; cregs = !cregs; procs; regions }
   in
-  List.iteri
-    (fun i m ->
-      Printf.bprintf body "// --- membrane %d ---\n" i;
-      List.iter (emit i []) (membrane_processes m))
-    membranes;
-  let header = Buffer.create 128 in
-  Buffer.add_string header "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n";
-  Printf.bprintf header "qreg q[%d];\n" (max 1 nqubits);
-  List.iter (fun (n, cmt) -> Printf.bprintf header "creg %s[1];%s\n" n cmt) !cregs;
-  Buffer.contents header ^ Buffer.contents body
+  let rec fix prev =
+    let c = lower_round () in
+    let cur = Hashtbl.length classical in
+    if cur > prev then fix cur else c
+  in
+  fix (-1)
+
+let compile_to_qasm (membranes : membrane list) : string =
+  Ir.to_qasm (lower membranes)

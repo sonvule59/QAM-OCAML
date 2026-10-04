@@ -12,15 +12,15 @@ let test_check_resource_equivalence _ =
   assert_bool "different named resource" (not (check_resource_equivalence r1 r3))
 
 let test_check_process_equivalence _ =
-  let p1 = ActionProcess (Send { chan = "a"; arg = "x" }, NullProcess) in
-  let p2 = ActionProcess (Send { chan = "a"; arg = "x" }, NullProcess) in
-  let p3 = ActionProcess (Receive { chan = "a"; arg = "x" }, NullProcess) in
+  let p1 = ActionProcess (mk_action (Send { chan = "a"; arg = Named "x" }), NullProcess) in
+  let p2 = ActionProcess (mk_action (Send { chan = "a"; arg = Named "x" }), NullProcess) in
+  let p3 = ActionProcess (mk_action (Receive { chan = "a"; arg = "x" }), NullProcess) in
   assert_bool "same process" (check_process_equivalence p1 p2);
   assert_bool "different process action" (not (check_process_equivalence p1 p3))
 
 let test_check_molecule_equivalence _ =
-  let m1 = ProcessMolecule (ActionProcess (LeftCombine "a<-k", NullProcess)) in
-  let m2 = ProcessMolecule (ActionProcess (LeftCombine "a<-k", NullProcess)) in
+  let m1 = ProcessMolecule (ActionProcess (mk_action (Encode { chan = "a"; msg = Named "k" }), NullProcess)) in
+  let m2 = ProcessMolecule (ActionProcess (mk_action (Encode { chan = "a"; msg = Named "k" }), NullProcess)) in
   let m3 = ResourceMolecule (SimpleResource "a") in
   assert_bool "same molecule" (check_molecule_equivalence m1 m2);
   assert_bool "different molecule kinds" (not (check_molecule_equivalence m1 m3))
@@ -29,21 +29,21 @@ let test_check_membrane_equivalence _ =
   let left =
     MoleculeMembrane
       [
-        ProcessMolecule (ActionProcess (Send { chan = "a"; arg = "x" }, NullProcess));
+        ProcessMolecule (ActionProcess (mk_action (Send { chan = "a"; arg = Named "x" }), NullProcess));
         ResourceMolecule (SimpleResource "a");
       ]
   in
   let same =
     MoleculeMembrane
       [
-        ProcessMolecule (ActionProcess (Send { chan = "a"; arg = "x" }, NullProcess));
+        ProcessMolecule (ActionProcess (mk_action (Send { chan = "a"; arg = Named "x" }), NullProcess));
         ResourceMolecule (SimpleResource "a");
       ]
   in
   let different =
     MoleculeMembrane
       [
-        ProcessMolecule (ActionProcess (Receive { chan = "a"; arg = "x" }, NullProcess));
+        ProcessMolecule (ActionProcess (mk_action (Receive { chan = "a"; arg = "x" }), NullProcess));
         ResourceMolecule (SimpleResource "a");
       ]
   in
@@ -257,7 +257,7 @@ let test_teleport_simulates _ =
   let alpha = 0.6 and beta = 0.8 in
   let branches =
     Sim.run
-      ~init0:({ Complex.re = alpha; im = 0.0 }, { Complex.re = beta; im = 0.0 })
+      ~init:(0, ({ Complex.re = alpha; im = 0.0 }, { Complex.re = beta; im = 0.0 }))
       qasm
   in
   assert_equal ~printer:string_of_int 4 (List.length branches);
@@ -284,6 +284,354 @@ let test_parser_sequencing _ =
       assert_equal ~printer:(fun s -> s) "{ nu c.c<-d.c->x.a!x., d, o }"
         (string_of_membrane m)
   | _ -> assert_failure "sequenced prefixes failed to parse"
+
+(* ---- Phase 1: static checker (typecheck.ml) ---- *)
+let check_str s =
+  match parse_membranes_from_string s with
+  | Ok m -> Typecheck.check m
+  | Error _ -> assert_failure ("parse failed: " ^ s)
+
+let assert_checks s =
+  match check_str s with
+  | Ok _ -> ()
+  | Error (e :: _) ->
+      assert_failure ("expected well-typed: " ^ s ^ " — " ^ Typecheck.string_of_error e)
+  | Error [] -> assert_failure "empty error list"
+
+let assert_rejects ~containing s =
+  match check_str s with
+  | Ok _ -> assert_failure ("expected a type error for: " ^ s)
+  | Error es ->
+      assert_bool
+        ("error should mention '" ^ containing ^ "'")
+        (List.exists
+           (fun e -> contains_sub (Typecheck.string_of_error e) containing)
+           es)
+
+let test_typecheck_protocols _ =
+  List.iter
+    (fun f ->
+      match parse_membranes_from_string (read_file f) with
+      | Ok m -> (
+          match Typecheck.check m with
+          | Ok _ -> ()
+          | Error (e :: _) ->
+              assert_failure (f ^ ": " ^ Typecheck.string_of_error e)
+          | Error [] -> assert_failure "empty error list")
+      | Error _ -> assert_failure ("parse failed: " ^ f))
+    [ "examples/qam/bitcommit.qam"; "examples/qam/teleport.qam";
+      "examples/qam/superdense.qam" ]
+
+(* Omega inference: teleport's c is quantum, a is classical *)
+let test_typecheck_omega _ =
+  match parse_membranes_from_string (read_file "examples/qam/teleport.qam") with
+  | Ok m -> (
+      match Typecheck.check m with
+      | Ok kinds ->
+          assert_equal (Some Typecheck.KQuantum) (Hashtbl.find_opt kinds "c");
+          assert_equal (Some Typecheck.KClassical) (Hashtbl.find_opt kinds "a")
+      | Error _ -> assert_failure "teleport should typecheck")
+  | Error _ -> assert_failure "parse failed"
+
+let test_typecheck_no_cloning _ =
+  assert_rejects ~containing:"no-cloning"
+    "{ nu c.c<-d.c<-d., d, o }, { nu c.c?y., o }"
+
+let test_typecheck_channel_arity _ =
+  assert_rejects ~containing:"only one membrane" "{ nu c., o }";
+  assert_rejects ~containing:"exactly two parties"
+    "{ nu c., o }, { nu c., o }, { nu c., o }"
+
+let test_typecheck_kind_conflict _ =
+  assert_rejects ~containing:"used as classical" "{ nu c.c!x., o }, { nu c., o }"
+
+let test_typecheck_missing_blank _ =
+  assert_rejects ~containing:"blank 'o'" "{ nu c. }, { nu c., o }"
+
+let test_typecheck_double_decode _ =
+  assert_rejects ~containing:"decoded 2 times"
+    "{ nu c.c->x.c->y., o }, { nu c.c?u., o }"
+
+let test_typecheck_residue_as_channel _ =
+  assert_rejects ~containing:"classical residue"
+    "{ nu c.c->x.x<-d., d, o }, { nu c.c?u., o }"
+
+(* the checker accepts the well-typed variant of the rejected shapes *)
+let test_typecheck_accepts_valid _ =
+  assert_checks "{ nu c.c<-d.c->x., d, o }, { nu c.c?y., o }"
+
+(* ---- Phase 1 Stage 3: named process definitions -------------------------- *)
+
+(* `let`-definitions elaborate away and compile to exactly the same circuit *)
+let test_definitions_compile_equal _ =
+  assert_equal ~printer:(fun s -> s)
+    (qasm_of_file "examples/qam/teleport.qam")
+    (qasm_of_file "examples/qam/teleport_defs.qam")
+
+(* a reference in continuation position (`nu c.A`) parses and elaborates *)
+let test_definitions_in_continuation _ =
+  let src = "let A = c->x. ;\n{ nu c.A, o }, { nu c.c?y., o }" in
+  match parse_membranes_from_string src with
+  | Ok [ m; _ ] ->
+      assert_equal ~printer:(fun s -> s) "{ nu c.c->x., o }" (string_of_membrane m)
+  | _ -> assert_failure "definition in continuation failed to parse/elaborate"
+
+(* an unresolved reference is a type error, not a silent no-op *)
+let test_definitions_undefined_ref _ =
+  assert_rejects ~containing:"undefined process reference"
+    "let A = nu c.B ;\n{ A, o }, { nu c., o }"
+
+(* ---- Phase 2: the abstract machine (semantics.ml) ------------------------ *)
+
+let machine_terminals path depth =
+  match parse_membranes_from_string (read_file path) with
+  | Ok cfg ->
+      List.map
+        (fun (t, tr) -> (Semantics.string_of_config t, tr))
+        (Semantics.reachable_terminals ~depth cfg)
+  | Error _ -> assert_failure ("parse failed: " ^ path)
+
+(* Teleportation executes in the machine itself (paper Examples 2/4/6/8):
+   unique terminal — Bob holds the message d — with the paper's label trace
+   Cohere(c); Decode(^c.d.o); Com(a.^c.d.o). *)
+let test_machine_teleportation _ =
+  match machine_terminals "examples/qam/teleport.qam" 14 with
+  | [ (t, tr) ] ->
+      assert_equal ~printer:(fun s -> s) "{ d.o }" t;
+      assert_equal ~printer:(String.concat ";")
+        [ "c"; "^c.d.o"; "a.^c.d.o" ] tr
+  | ts -> assert_failure (Printf.sprintf "expected 1 terminal, got %d" (List.length ts))
+
+(* Superdense coding terminates fully (paper Example 21): {|0|},{|0|}. *)
+let test_machine_superdense _ =
+  match machine_terminals "examples/qam/superdense.qam" 16 with
+  | [ (t, tr) ] ->
+      assert_equal ~printer:(fun s -> s) "(empty)" t;
+      assert_equal ~printer:(String.concat ";") [ "c"; "^c.i"; "a.^c.i" ] tr
+  | ts -> assert_failure (Printf.sprintf "expected 1 terminal, got %d" (List.length ts))
+
+(* Bit-commitment (paper Example 1): Bob keeps the quantum residue ^c.~o. *)
+let test_machine_bitcommit _ =
+  match machine_terminals "examples/qam/bitcommit.qam" 10 with
+  | [ (t, tr) ] ->
+      assert_equal ~printer:(fun s -> s) "{ ^c.~o }" t;
+      assert_equal ~printer:(String.concat ";") [ "c"; "^c.o" ] tr
+  | ts -> assert_failure (Printf.sprintf "expected 1 terminal, got %d" (List.length ts))
+
+(* CL and CR: the machine explores BOTH branches of a choice (unlike the
+   legacy commit-left reducer). *)
+let test_machine_choice_both_branches _ =
+  match parse_membranes_from_string "{ a!x. + b!y. }, { a?u. }, { b?v. }" with
+  | Ok cfg ->
+      assert_equal ~printer:(String.concat " | ")
+        [ ""; "a.x"; "b.y" ]
+        (Semantics.traces ~depth:4 cfg)
+  | Error _ -> assert_failure "parse failed"
+
+(* Bounded trace refinement (paper Defs. 14-15). *)
+let test_machine_trace_refinement _ =
+  let parse s =
+    match parse_membranes_from_string s with
+    | Ok c -> c
+    | Error _ -> assert_failure ("parse failed: " ^ s)
+  in
+  let choice = parse "{ a!x. + b!y. }, { a?u. }, { b?v. }" in
+  let small = parse "{ a!x. }, { a?u. }" in
+  assert_bool "deterministic refines nondeterministic"
+    (Semantics.trace_refines ~depth:4 small choice);
+  assert_bool "nondeterministic does not refine deterministic"
+    (not (Semantics.trace_refines ~depth:4 choice small));
+  assert_bool "refinement is reflexive" (Semantics.trace_refines ~depth:6 choice choice)
+
+(* The meet algebra ⊙ (paper Def. 5). *)
+let test_machine_meet_algebra _ =
+  let d = Channeled ("d", Blank) in
+  (* identity: ◦ ⊙ q ≡ q *)
+  assert_equal (Named "q") (Semantics.meet_normalize (Meet (Blank, Named "q")));
+  (* quantum key-lock: ^c.q ⊙ ^c.~q ≡ q (sheds the label, Ex. 8) *)
+  assert_equal d
+    (Semantics.meet_normalize
+       (Meet (Channeled ("^c", d), Channeled ("^c", Residue d))));
+  (* classical key-lock keeps the label (Ex. 21): ^c.(^c.i ⊙ ~i) ≡ ^c.i *)
+  assert_equal
+    (Channeled ("^c", Named "i"))
+    (Semantics.meet_normalize
+       (Channeled ("^c", Meet (Channeled ("^c", Named "i"), Residue (Named "i")))));
+  (* classical cancellation: i ⊙ i ≡ ◦ *)
+  let p = Channeled ("^c", Named "m") in
+  assert_equal Blank (Semantics.meet_normalize (Meet (p, p)))
+
+(* ---- Phase 3: circuit IR, scheduling, deadlock detection, passes --------- *)
+
+let qasm_of_string s =
+  match parse_membranes_from_string s with
+  | Ok cfg -> Compile.compile_to_qasm cfg
+  | Error _ -> assert_failure ("parse failed: " ^ s)
+
+(* The receiver membrane may come FIRST: the scheduler blocks its waits until
+   the sender's instructions are emitted (old "sender first" hack removed). *)
+let receiver_first_teleport = "{ nu c.c?u.a?z.u<-z., o }, { nu c.c<-d.c->x.a!x., d, o }"
+
+let test_compile_receiver_first _ =
+  let q = qasm_of_string receiver_first_teleport in
+  (* layout: Bob o=q0, Alice d=q1 o=q2; Bob (first creator) drives the Bell *)
+  assert_bool "Bell pair q0-q2" (contains_sub q "cx q[0], q[2];");
+  assert_bool "encode CNOT" (contains_sub q "cx q[1], q[2];");
+  assert_bool "X correction on Bob" (contains_sub q "if(m0==1) x q[0];");
+  assert_bool "Z correction on Bob" (contains_sub q "if(m1==1) z q[0];");
+  assert_bool "no deadlock" (not (contains_sub q "deadlock"))
+
+(* ... and the scheduled circuit still teleports: message starts on q[1]
+   (Alice's d), must arrive on q[0] (Bob) in every branch. *)
+let test_simulate_receiver_first _ =
+  let qasm = qasm_of_string receiver_first_teleport in
+  let alpha = 0.6 and beta = 0.8 in
+  let branches =
+    Sim.run ~init:(1, ({ Complex.re = alpha; im = 0.0 }, { Complex.re = beta; im = 0.0 })) qasm
+  in
+  assert_equal ~printer:string_of_int 4 (List.length branches);
+  List.iter
+    (fun br ->
+      (* m0 measured q2, m1 measured q1; Bob is q0 (bit value 1) *)
+      let bit r = match List.assoc_opt r br.Sim.cregs with Some v -> v | None -> 0 in
+      let base = (2 * bit "m1") + (4 * bit "m0") in
+      let a0 = br.Sim.amp.(base) and a1 = br.Sim.amp.(base + 1) in
+      let p = Complex.norm2 a0 +. Complex.norm2 a1 in
+      assert_bool "branch probability 1/4" (Float.abs (p -. 0.25) < 1e-9);
+      let cross =
+        Complex.sub
+          (Complex.mul a0 { Complex.re = beta; im = 0.0 })
+          (Complex.mul a1 { Complex.re = alpha; im = 0.0 })
+      in
+      assert_bool "Bob's qubit carries the message" (Complex.norm cross < 1e-9))
+    branches
+
+(* Circular classical dependency is reported, not silently miscompiled. *)
+let test_compile_deadlock_detected _ =
+  let q = qasm_of_string "{ a?x.b!x. }, { b?y.a!y. }" in
+  assert_bool "deadlock reported"
+    (contains_sub q "classical synchronization deadlock")
+
+(* Unused resources do not waste qubits: the register is compacted. *)
+let test_compile_dead_qubit_elimination _ =
+  let q = qasm_of_string "{ nu c., o, zz }, { nu c., o }" in
+  assert_bool "register compacted to 2" (contains_sub q "qreg q[2];");
+  assert_bool "Bell pair remapped to q[0],q[1]" (contains_sub q "cx q[0], q[1];");
+  assert_bool "no gate on the dead slot" (not (contains_sub q "cx q[0], q[2]"))
+
+(* Peephole pass: adjacent self-inverse gate pairs cancel. *)
+let test_ir_gate_cancellation _ =
+  assert_equal [ (0, Ir.X 1) ]
+    (Ir.cancel_gates [ (0, Ir.H 0); (0, Ir.H 0); (0, Ir.X 1) ]);
+  assert_equal []
+    (Ir.cancel_gates
+       [ (0, Ir.CX (0, 1)); (1, Ir.CX (0, 1)); (0, Ir.Z 2); (0, Ir.Z 2) ]);
+  (* different qubits do not cancel *)
+  assert_equal [ (0, Ir.H 0); (0, Ir.H 1) ]
+    (Ir.cancel_gates [ (0, Ir.H 0); (0, Ir.H 1) ])
+
+(* Phase 2 closure: exact (unbounded) traces for the replication-free
+   fragment agree with the bounded approximation, and repl is rejected. *)
+let test_traces_exact _ =
+  let parse s =
+    match parse_membranes_from_string s with
+    | Ok c -> c
+    | Error _ -> assert_failure ("parse failed: " ^ s)
+  in
+  let choice = parse "{ a!x. + b!y. }, { a?u. }, { b?v. }" in
+  assert_equal ~printer:(String.concat " | ")
+    (Semantics.traces ~depth:8 choice)
+    (Semantics.traces_exact choice);
+  assert_bool "exact refinement reflexive" (Semantics.trace_refines_exact choice choice);
+  assert_raises (Invalid_argument "traces_exact: configuration uses repl; use traces ~depth")
+    (fun () -> Semantics.traces_exact (parse "{ repl nu c., o }"))
+
+(* ---- Phase 4: backends — OpenQASM 3 and the concurrent target (b) -------- *)
+
+let circuit_of_string s =
+  match parse_membranes_from_string s with
+  | Ok cfg -> Compile.lower cfg
+  | Error _ -> assert_failure ("parse failed: " ^ s)
+
+let circuit_of_file path = circuit_of_string (read_file path)
+
+let test_qasm3_teleport _ =
+  let q = Ir.to_qasm3 (circuit_of_file "examples/qam/teleport.qam") in
+  assert_bool "QASM3 header" (String.starts_with ~prefix:"OPENQASM 3.0;" q);
+  assert_bool "qubit decl" (contains_sub q "qubit[3] q;");
+  assert_bool "bit decl" (contains_sub q "bit m0;");
+  assert_bool "measure assignment" (contains_sub q "m0 = measure q[1];");
+  assert_bool "real if statement" (contains_sub q "if (m0 == 1) { x q[2]; }");
+  assert_bool "Z correction" (contains_sub q "if (m1 == 1) { z q[2]; }")
+
+(* superdense's classical message becomes a genuine runtime input parameter *)
+let test_qasm3_input_bit _ =
+  let q = Ir.to_qasm3 (circuit_of_file "examples/qam/superdense.qam") in
+  assert_bool "input bit" (contains_sub q "input bit i;");
+  assert_bool "input-controlled X" (contains_sub q "if (i == 1) { x q[0]; }")
+
+let test_concurrent_emit _ =
+  let t = Ir.to_concurrent (circuit_of_file "examples/qam/teleport.qam") in
+  assert_bool "shared state" (contains_sub t "shared qubit[3] q;");
+  assert_bool "process 0 region" (contains_sub t "process 0 owns q[0,1] {");
+  assert_bool "process 1 region" (contains_sub t "process 1 owns q[2] {");
+  assert_bool "send sync" (contains_sub t "send a;");
+  assert_bool "wait sync" (contains_sub t "wait c;");
+  assert_bool "corrections local to Bob" (contains_sub t "if (m0 == 1) { x q[2]; }")
+
+(* Locality (paper Thm. 7 territory): the ONLY instruction touching another
+   membrane's region is Cohere's collaborative Bell-pair CX. *)
+let test_concurrent_locality _ =
+  match Ir.cross_region (circuit_of_file "examples/qam/teleport.qam") with
+  | [ (0, Ir.CX (1, 2)) ] -> ()
+  | l -> assert_failure (Printf.sprintf "expected only the Bell CX, got %d cross-region ops" (List.length l))
+
+(* The concurrent runtime teleports: same physics assertions as the flat
+   backend, but executed per-process with blocking send/wait.
+   [meas] maps each measurement creg to the qubit it measured. *)
+let assert_teleports ~bob ~meas branches =
+  let alpha = 0.6 and beta = 0.8 in
+  assert_equal ~printer:string_of_int 4 (List.length branches);
+  List.iter
+    (fun br ->
+      let bit r = match List.assoc_opt r br.Sim.cregs with Some v -> v | None -> 0 in
+      let base =
+        List.fold_left
+          (fun acc (r, q) -> if bit r = 1 then acc lor (1 lsl q) else acc)
+          0 meas
+      in
+      let a0 = br.Sim.amp.(base) and a1 = br.Sim.amp.(base lor (1 lsl bob)) in
+      let p = Complex.norm2 a0 +. Complex.norm2 a1 in
+      assert_bool "branch probability 1/4" (Float.abs (p -. 0.25) < 1e-9);
+      let cross =
+        Complex.sub
+          (Complex.mul a0 { Complex.re = beta; im = 0.0 })
+          (Complex.mul a1 { Complex.re = alpha; im = 0.0 })
+      in
+      assert_bool "Bob's qubit carries the message" (Complex.norm cross < 1e-9))
+    branches
+
+let test_concurrent_sim_teleport _ =
+  let c = circuit_of_file "examples/qam/teleport.qam" in
+  let branches =
+    Sim.run_ir ~init:(0, ({ Complex.re = 0.6; im = 0.0 }, { Complex.re = 0.8; im = 0.0 })) c
+  in
+  (* msg q0; m0 measured q1, m1 measured q0; Bob q2 *)
+  assert_teleports ~bob:2 ~meas:[ ("m0", 1); ("m1", 0) ] branches
+
+(* receiver membrane first: the runtime's blocking waits handle it *)
+let test_concurrent_sim_receiver_first _ =
+  let c = circuit_of_string receiver_first_teleport in
+  let branches =
+    Sim.run_ir ~init:(1, ({ Complex.re = 0.6; im = 0.0 }, { Complex.re = 0.8; im = 0.0 })) c
+  in
+  (* msg q1; m0 measured q2, m1 measured q1; Bob q0 *)
+  assert_teleports ~bob:0 ~meas:[ ("m0", 2); ("m1", 1) ] branches
+
+let test_concurrent_deadlock_raises _ =
+  let c = circuit_of_string "{ a?x.b!x. }, { b?y.a!y. }" in
+  assert_raises (Failure "concurrent execution deadlock on channel(s): a, b")
+    (fun () -> Sim.run_ir c)
 
 let test_chem_dsl_parse _ =
   let dsl =
@@ -357,6 +705,37 @@ let suite =
          "test_bell_simulates" >:: test_bell_simulates;
          "test_teleport_simulates" >:: test_teleport_simulates;
          "test_parser_sequencing" >:: test_parser_sequencing;
+         "test_typecheck_protocols" >:: test_typecheck_protocols;
+         "test_typecheck_omega" >:: test_typecheck_omega;
+         "test_typecheck_no_cloning" >:: test_typecheck_no_cloning;
+         "test_typecheck_channel_arity" >:: test_typecheck_channel_arity;
+         "test_typecheck_kind_conflict" >:: test_typecheck_kind_conflict;
+         "test_typecheck_missing_blank" >:: test_typecheck_missing_blank;
+         "test_typecheck_double_decode" >:: test_typecheck_double_decode;
+         "test_typecheck_residue_as_channel" >:: test_typecheck_residue_as_channel;
+         "test_typecheck_accepts_valid" >:: test_typecheck_accepts_valid;
+         "test_definitions_compile_equal" >:: test_definitions_compile_equal;
+         "test_definitions_in_continuation" >:: test_definitions_in_continuation;
+         "test_definitions_undefined_ref" >:: test_definitions_undefined_ref;
+         "test_machine_teleportation" >:: test_machine_teleportation;
+         "test_machine_superdense" >:: test_machine_superdense;
+         "test_machine_bitcommit" >:: test_machine_bitcommit;
+         "test_machine_choice_both_branches" >:: test_machine_choice_both_branches;
+         "test_machine_trace_refinement" >:: test_machine_trace_refinement;
+         "test_machine_meet_algebra" >:: test_machine_meet_algebra;
+         "test_compile_receiver_first" >:: test_compile_receiver_first;
+         "test_simulate_receiver_first" >:: test_simulate_receiver_first;
+         "test_compile_deadlock_detected" >:: test_compile_deadlock_detected;
+         "test_compile_dead_qubit_elimination" >:: test_compile_dead_qubit_elimination;
+         "test_ir_gate_cancellation" >:: test_ir_gate_cancellation;
+         "test_traces_exact" >:: test_traces_exact;
+         "test_qasm3_teleport" >:: test_qasm3_teleport;
+         "test_qasm3_input_bit" >:: test_qasm3_input_bit;
+         "test_concurrent_emit" >:: test_concurrent_emit;
+         "test_concurrent_locality" >:: test_concurrent_locality;
+         "test_concurrent_sim_teleport" >:: test_concurrent_sim_teleport;
+         "test_concurrent_sim_receiver_first" >:: test_concurrent_sim_receiver_first;
+         "test_concurrent_deadlock_raises" >:: test_concurrent_deadlock_raises;
          "test_chem_dsl_parse" >:: test_chem_dsl_parse;
          "test_vqe_loop_decreases_energy" >:: test_vqe_loop_decreases_energy;
          "test_openqasm_export" >:: test_openqasm_export;

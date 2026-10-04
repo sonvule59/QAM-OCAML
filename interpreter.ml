@@ -8,9 +8,51 @@ let position_string (lb : Lexing.lexbuf) : string =
   Printf.sprintf "line %d, column %d" p.Lexing.pos_lnum
     (p.Lexing.pos_cnum - p.Lexing.pos_bol + 1)
 
+(* ---- named-definition elaboration ----------------------------------------
+   `let A = process ;` definitions are substituted away right after parsing:
+   ProcessRef nodes (and bare molecule names that match a definition) are
+   replaced by their bodies. A depth guard keeps self-recursive definitions
+   from looping; any ProcessRef surviving elaboration is flagged by the
+   typechecker as undefined. *)
+
+let rec subst_refs (defs : (string * process) list) (depth : int) (p : process) :
+    process =
+  if depth <= 0 then p
+  else
+    match p with
+    | ProcessRef n -> (
+        match List.assoc_opt n defs with
+        | Some body -> subst_refs defs (depth - 1) body
+        | None -> p)
+    | ActionProcess (a, k) -> ActionProcess (a, subst_refs defs depth k)
+    | Choice (a, b) -> Choice (subst_refs defs depth a, subst_refs defs depth b)
+    | Replication r -> Replication (subst_refs defs depth r)
+    | NullProcess -> NullProcess
+
+let elaborate (defs : (string * process) list) (membranes : membrane list) :
+    membrane list =
+  let elab_molecule = function
+    | ResourceMolecule (SimpleResource n) when List.mem_assoc n defs ->
+        (* a bare name in molecule position parses as a resource; promote it to
+           the defined process (documented resolution rule) *)
+        ProcessMolecule (subst_refs defs 32 (ProcessRef n))
+    | ProcessMolecule p -> ProcessMolecule (subst_refs defs 32 p)
+    | m -> m
+  in
+  let rec elab_membrane = function
+    | MoleculeMembrane ms -> MoleculeMembrane (List.map elab_molecule ms)
+    | AirlockedMembrane (l, r, rt) ->
+        AirlockedMembrane (elab_membrane l, r, elab_membrane rt)
+    | NullMembrane -> NullMembrane
+  in
+  List.map elab_membrane membranes
+
 let parse_membranes_from_lexbuf (lb : Lexing.lexbuf) :
     (membrane list, parse_error) result =
-  try Ok (Parser.main Lexer.token lb) with
+  try
+    let defs, membranes = Parser.main Lexer.token lb in
+    Ok (elaborate defs membranes)
+  with
   | Lexer.SyntaxError msg -> Error (Lex_err (msg, position_string lb))
   | Parser.Error -> Error (Parse_err (position_string lb))
   | Ast.Parse_error -> Error (Parse_err (position_string lb))
@@ -29,23 +71,7 @@ let rec take_first pred acc items =
       if pred x then Some (x, List.rev_append acc xs)
       else take_first pred (x :: acc) xs
 
-let before_substring (s : string) (needle : string) : string =
-  let s_len = String.length s in
-  let n_len = String.length needle in
-  let rec aux i =
-    if i + n_len > s_len then s
-    else if String.sub s i n_len = needle then String.sub s 0 i
-    else aux (i + 1)
-  in
-  aux 0
-
-let action_channel (action : action) : string =
-  match action with
-  | NewChannel c -> c
-  | Send { chan; _ } -> chan
-  | Receive { chan; _ } -> chan
-  | LeftCombine s -> before_substring s "<-"
-  | RightCombine s -> before_substring s "->"
+(* [action_channel] now lives in Ast (actions are structured records). *)
 
 let reduce_encode (m : membrane) : membrane option =
   match m with
@@ -53,13 +79,15 @@ let reduce_encode (m : membrane) : membrane option =
       match
         take_first
           (function
-            | ProcessMolecule (ActionProcess (LeftCombine _, _)) -> true
+            | ProcessMolecule (ActionProcess ({ act = Encode _; _ }, _)) -> true
             | _ -> false)
           [] molecules
       with
       | None -> None
-      | Some (ProcessMolecule (ActionProcess (LeftCombine a, cont)), rest_after_action) ->
-          let channel = action_channel (LeftCombine a) in
+      | Some
+          ( ProcessMolecule (ActionProcess ({ act = Encode { chan; _ }; _ }, cont)),
+            rest_after_action ) ->
+          let channel = chan in
           let is_target_resource = function
             | ResourceMolecule (SimpleResource rname) -> rname = channel
             | _ -> false
@@ -81,20 +109,23 @@ let reduce_decode (m : membrane) : membrane option =
     match
       take_first
         (function
-          | ProcessMolecule (ActionProcess (RightCombine _, _)) -> true
+          | ProcessMolecule (ActionProcess ({ act = Decode _; _ }, _)) -> true
           | _ -> false)
         [] molecules
     with
     | None -> None
-    | Some (ProcessMolecule (ActionProcess (RightCombine encoded, left_cont)), rest_left) ->
-        let channel = action_channel (RightCombine encoded) in
+    | Some
+        ( ProcessMolecule (ActionProcess ({ act = Decode { chan; _ }; _ }, left_cont)),
+          rest_left ) ->
+        let channel = chan in
         let is_receiver = function
-          | ProcessMolecule (ActionProcess (Receive recv, _)) ->
-              action_channel (Receive recv) = channel
+          | ProcessMolecule (ActionProcess ({ act = Receive { chan; _ }; _ }, _)) ->
+              chan = channel
           | _ -> false
         in
         (match take_first is_receiver [] rest_left with
-        | Some (ProcessMolecule (ActionProcess (Receive _, right_cont)), rest_right) ->
+        | Some (ProcessMolecule (ActionProcess ({ act = Receive _; _ }, right_cont)), rest_right)
+          ->
             Some
               (MoleculeMembrane
                  (ProcessMolecule left_cont :: ProcessMolecule right_cont :: rest_right))
@@ -109,21 +140,24 @@ let reduce_decode (m : membrane) : membrane option =
       match
         take_first
           (function
-            | ProcessMolecule (ActionProcess (RightCombine encoded, _)) ->
-                action_channel (RightCombine encoded) = boundary
+            | ProcessMolecule (ActionProcess ({ act = Decode { chan; _ }; _ }, _)) ->
+                chan = boundary
             | _ -> false)
           [] left_mols
       with
-      | Some (ProcessMolecule (ActionProcess (RightCombine _, left_cont)), left_rest) -> (
+      | Some (ProcessMolecule (ActionProcess ({ act = Decode _; _ }, left_cont)), left_rest)
+        -> (
           match
             take_first
               (function
-                | ProcessMolecule (ActionProcess (Receive recv, _)) ->
-                    action_channel (Receive recv) = boundary
+                | ProcessMolecule (ActionProcess ({ act = Receive { chan; _ }; _ }, _)) ->
+                    chan = boundary
                 | _ -> false)
               [] right_mols
           with
-          | Some (ProcessMolecule (ActionProcess (Receive _, right_cont)), right_rest) ->
+          | Some
+              ( ProcessMolecule (ActionProcess ({ act = Receive _; _ }, right_cont)),
+                right_rest ) ->
               Some
                 (AirlockedMembrane
                    ( MoleculeMembrane (ProcessMolecule left_cont :: left_rest),
@@ -139,14 +173,15 @@ let reduce_cohere (m : membrane) : membrane option =
       match
         take_first
           (function
-            | ProcessMolecule (ActionProcess (NewChannel _, _)) -> true
+            | ProcessMolecule (ActionProcess ({ act = NewChannel _; _ }, _)) -> true
             | _ -> false)
           [] molecules
       with
-      | Some (ProcessMolecule (ActionProcess (NewChannel channel, new_cont)), rest_after_new)
-        ->
+      | Some
+          ( ProcessMolecule (ActionProcess ({ act = NewChannel channel; _ }, new_cont)),
+            rest_after_new ) ->
           let uses_channel = function
-            | ProcessMolecule (ActionProcess (act, _)) -> action_channel act = channel
+            | ProcessMolecule (ActionProcess (a, _)) -> action_channel a = channel
             | _ -> false
           in
           (match take_first uses_channel [] rest_after_new with
@@ -183,8 +218,31 @@ let reduce_choice (m : membrane) : membrane option =
       | _ -> None)
   | _ -> None
 
+(* Rename each nu-bound channel in [p] to a name fresh w.r.t. [used]. Used at
+   replication unfolding so independent copies of `nu c.` get distinct channels
+   instead of colliding by name. *)
+let freshen_nus (used : string list) (p : process) : process =
+  let rec go used p =
+    match p with
+    | ActionProcess (({ act = NewChannel c; loc } as _a), k) ->
+        let c', k' =
+          if List.mem c used then
+            let c' = freshen c used in
+            (c', rename_process c c' k)
+          else (c, k)
+        in
+        ActionProcess ({ act = NewChannel c'; loc }, go (c' :: used) k')
+    | ActionProcess (a, k) -> ActionProcess (a, go used k)
+    | Choice (a, b) -> Choice (go used a, go used b)
+    | Replication r -> Replication (go used r)
+    | (NullProcess | ProcessRef _) as x -> x
+  in
+  go used p
+
 (* Replication: unfold `repl P` into `P | repl P`. This always grows the soup,
-   so it is bounded by the fuel in `normalize` rather than reaching a fixpoint. *)
+   so it is bounded by the fuel in `normalize` rather than reaching a fixpoint.
+   The active copy's nu-binders are freshened against every name already in the
+   membrane, so unfolded copies cannot spuriously interact by name capture. *)
 let reduce_replication (m : membrane) : membrane option =
   match m with
   | MoleculeMembrane molecules -> (
@@ -194,9 +252,15 @@ let reduce_replication (m : membrane) : membrane option =
           [] molecules
       with
       | Some (ProcessMolecule (Replication p), rest) ->
+          let used =
+            List.concat_map
+              (function ProcessMolecule q -> names_of_process q | _ -> [])
+              molecules
+          in
           Some
             (MoleculeMembrane
-               (ProcessMolecule p :: ProcessMolecule (Replication p) :: rest))
+               (ProcessMolecule (freshen_nus used p)
+               :: ProcessMolecule (Replication p) :: rest))
       | _ -> None)
   | _ -> None
 
@@ -228,15 +292,25 @@ let string_of_message = function
   | Quantum s -> "q:" ^ s
   | ClassicalData s -> "c:" ^ s
 
-let string_of_action = function
+let rec string_of_msg = function
+  | Blank -> "o"
+  | Named n -> n
+  | Channeled (c, m) -> c ^ "." ^ string_of_msg m
+  | Projected (c, m) -> "^" ^ c ^ "." ^ string_of_msg m
+  | Residue m -> "~" ^ string_of_msg m
+  | Meet (a, b) -> "(" ^ string_of_msg a ^ " & " ^ string_of_msg b ^ ")"
+
+let string_of_action { act; _ } =
+  match act with
   | NewChannel c -> "nu " ^ c ^ "."
-  | Send { chan; arg } -> chan ^ "!" ^ arg ^ "."
+  | Send { chan; arg } -> chan ^ "!" ^ string_of_msg arg ^ "."
   | Receive { chan; arg } -> chan ^ "?" ^ arg ^ "."
-  | LeftCombine s -> s ^ "."
-  | RightCombine s -> s ^ "."
+  | Encode { chan; msg } -> chan ^ "<-" ^ string_of_msg msg ^ "."
+  | Decode { chan; binder } -> chan ^ "->" ^ binder ^ "."
 
 let rec string_of_process = function
   | NullProcess -> "0"
+  | ProcessRef n -> n
   | ActionProcess (a, NullProcess) -> string_of_action a
   | ActionProcess (a, p) -> string_of_action a ^ string_of_process p
   | Choice (p, q) -> string_of_process p ^ " + " ^ string_of_process q
@@ -245,6 +319,7 @@ let rec string_of_process = function
 let rec string_of_resource = function
   | SimpleResource s -> s
   | NullResource -> "o"
+  | ChannelParty (c, m) -> c ^ "." ^ string_of_msg m
   | CombinedResource (r, m) -> string_of_resource r ^ ".(" ^ string_of_message m ^ ")"
   | MeetOperation (r1, r2) -> string_of_resource r1 ^ " & " ^ string_of_resource r2
 

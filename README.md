@@ -77,9 +77,14 @@ see [`examples/qam/README.md`](examples/qam/README.md).
 ## CLI
 
 ```text
-qam compile FILE.qam    compile a QAM configuration to OpenQASM 2.0
+qam check FILE.qam      typecheck (channel kinds, well-formedness, no-cloning)
+qam run FILE.qam [N]    execute the abstract machine (LTS) to its terminals
+qam compile FILE.qam    typecheck, then compile to OpenQASM 2.0
+    --qasm3                 ... to OpenQASM 3.0 (bits, if-statements, input parameters)
+    --concurrent            ... to the concurrent circuit, target (b)
 qam simulate FILE.qam   compile, then run on the built-in statevector simulator
-qam repl                interactive reduction / equivalence REPL
+    --concurrent            ... on the concurrent runtime (per-process, blocking send/wait)
+qam repl                interactive reduction / equivalence REPL (legacy fragment)
 ```
 
 (From a clone, prefix with `dune exec ./qam.exe --`; or `./run.sh <args>`.)
@@ -88,8 +93,11 @@ qam repl                interactive reduction / equivalence REPL
 
 | Stage | Where |
 |-------|-------|
-| Lexer / Menhir grammar → `Ast.membrane list` | `grammar/`, `qam_ast/ast.ml` |
-| Reduction passes (ENCODE, DECODE, COHERE, Choice, Replication), fuel-bounded `normalize`, term printer | `interpreter.ml` |
+| Lexer / Menhir grammar → `Ast.membrane list` (definitions elaborated away) | `grammar/`, `qam_ast/ast.ml` |
+| Static checker: channel-kind inference (Ω), well-formedness, static no-cloning | `typecheck.ml` |
+| **The abstract machine**: configuration-level LTS with the paper's rules, meet algebra ⊙, traces + trace refinement | `semantics.ml` |
+| Legacy single-membrane reducer + term printer (kept for the REPL and canon-equivalence fragment) | `interpreter.ml` |
+| **Circuit IR**: per-membrane instruction lists with first-class send/wait; scheduling, deadlock detection, peephole + dead-qubit passes; three backends (QASM 2, QASM 3, concurrent target (b)) | `ir.ml` |
 | Canonicalizer + structural equivalence | `checkEquivalence.ml` |
 | QAM → OpenQASM 2.0 backend | `compile.ml` |
 | Statevector simulator for the emitted QASM subset | `sim.ml` |
@@ -113,6 +121,39 @@ Action prefixes: `nu c.` (quantum channel creation, the paper's ν),
 `nu c.c->x.a!x.` is ν c, then decode, then send — the paper's `A R` form.
 Prefixing binds tighter than `+`, so `a!x.b?y. + c!z.` is `(a!x.b?y.) + (c!z.)`.
 Parse errors report line and column.
+
+**Named definitions** let protocols read like the paper's examples:
+
+```text
+let Alice = nu c.c<-d.c->x.a!x. ;
+let Bob = nu c.c?u.a?z.u<-z. ;
+{ Alice, d, o }, { Bob, o }
+```
+
+Definitions are substituted away right after parsing. A bare name in molecule
+position parses as a resource and is promoted to the defined process when a
+matching `let` exists; an unresolved reference is a type error.
+
+## Static checking (`typecheck.ml`)
+
+`qam check` (also run automatically by `compile`/`simulate`) rejects ill-formed
+protocols before codegen, with positioned errors:
+
+- **Channel kinds (the paper's Ω):** ν-created / encoded / decoded channels are
+  quantum; `!`-sent channels are classical; receive is polymorphic. Conflicts
+  (e.g. `nu c.` then `c!x.`) are errors.
+- **Well-formedness (paper Def. 23):** every quantum channel has exactly two
+  creating membranes, and each creating membrane holds a blank `o` for the
+  Cohere rule to consume.
+- **Static no-cloning (paper Thm. 3):** a named quantum resource is consumed by
+  at most one encode; a channel party is used as a quantum message at most
+  once; a channel is decoded at most once; a decode's classical residue cannot
+  be used as a channel.
+
+```text
+$ qam check bad.qam
+Type error: line 1, column 13: no-cloning violation: quantum resource d in membrane 0 is consumed 2 times
+```
 
 ## Reductions: parses vs. reduces
 
@@ -184,6 +225,59 @@ m1 ≡ m2   iff   canon(normalize(m1))  =_struct  canon(normalize(m2))
 
 See [`examples/qam/equiv.md`](examples/qam/equiv.md) for the worked ≡ / ≢ table.
 
+## The abstract machine (`semantics.ml`)
+
+`semantics.ml` implements the paper's reduction semantics as a
+configuration-level **labeled transition system**:
+
+```
+step : membrane list -> (label * membrane list) list
+```
+
+Every successor of every redex is returned — Choice explores **both** branches
+(rules CL *and* CR), so the legacy commit-left limitation does not apply here.
+Implemented rules: **Cohere** (inter-membrane, consumes a blank `◦` per party,
+produces `c.◦`, label `c`), **Encode** with **QLocal** fused, **Decode** fused
+with **AirEQ** (pools the two parties' content, binds the classical residue
+`^c.mu` on the decoder side and the projective channel `^c` plus quantum
+residue `^c.~mu` on the receiver side), **CLocal**, **Com** (label `a.i`),
+**MT/NT** (replication, ν-binders freshened), **ID1/ID2** as tidying, and —
+behind flags, off by default because they explode the state space — **Split**
+and **Decohere**. Projective channels are ordinary names prefixed `^`; `~m`
+prints the residue `†m`.
+
+The **meet algebra ⊙ (Def. 5)** is implemented as directed rewrites, including
+the key-lock recovery `^c.q ⊙ ^c.~q ≡ q`. Fidelity note: Def. 5 leaves the fate
+of the projective label implicit, and the paper's worked examples differ — a
+*quantum* payload sheds the label (Example 8: teleportation recovers `d.e`
+plain), while a *classical* payload keeps it so CLocal can deliver it
+(Example 21: `^c.(^c.i ⊙ ~i) ≡ ^c.i`). We implement exactly that distinction.
+
+**The machine executes the paper's protocols** (`qam run`):
+
+```text
+$ qam run examples/qam/teleport.qam
+initial : { nu c.c<-d.c->x.a!x., d, o }, { nu c.c?u.a?z.u<-z., o }
+terminal: { d.o }
+  trace : [c; ^c.d.o; a.^c.d.o]
+```
+
+Bob ends holding the message `d` — teleportation, executed abstractly, with the
+paper's label trace (Cohere; Decode; Com). Superdense coding terminates to the
+empty configuration ({|0|},{|0|}, Example 21) and bit-commitment leaves Bob the
+quantum residue `^c.~o` (Example 1). Locked by `test_machine_*`.
+
+**Traces and refinement (Defs. 14–15):** `traces ~depth` computes the
+prefix-closed set of visible-label traces over at most `depth` steps, and
+`trace_refines ~depth c1 c2` checks `T(c1) ⊆ T(c2)` at equal depth. For
+**replication-free** configurations the LTS is finite (every rule strictly
+consumes), so `traces_exact` / `trace_refines_exact` compute the *unbounded*
+sets — refinement is exact there. With `repl` the LTS is infinite-state and
+only the bounded approximation is computable (exact inclusion is undecidable
+in general); `traces_exact` rejects such configurations rather than pretend.
+The legacy normalize-then-canonicalize equivalence (above) remains for the
+older fragment; trace refinement is the machine-level notion.
+
 ## Compiling QAM to OpenQASM (`compile.ml`)
 
 `compile.ml` lowers a QAM configuration (`Ast.membrane list`) to a circuit,
@@ -223,12 +317,48 @@ correction bits). Figure 13's C-EncodeQ/C-DecodeQ as literally written (H on the
 message entangled with Bob's qubit and does not reproduce teleportation on a
 statevector — the Fig. 10 lowering is the one that passes simulation.
 
-**Known limits:** flat OpenQASM discards the QAM's locality/no-relocation
-guarantee (a faithful, concurrent-IR target à la the paper's Concurrent SQIR is
-future work); classical channels carry one residue and the sender's membrane
-must precede the receiver's (send/wait are linearized, no scheduler); `N = 1`
-qubit per message and one encode per channel; projective channels are resolved
-syntactically (a receive-bound name stands for its channel), not semantically.
+**Compiler architecture (Phase 3):** compilation is now a real pipeline —
+lower → IR → passes → emit. Lowering produces one instruction list **per
+membrane** (`ir.ml`), with classical `send`/`wait` as first-class instructions;
+classical dataflow is linked by **fixpoint rounds**, so membranes may appear in
+any order (a receiver listed before its sender compiles — and still passes the
+teleportation simulation, `test_simulate_receiver_first`). The flat-QASM
+backend then runs passes:
+
+- **scheduling** — list-schedules the per-membrane programs, blocking each
+  `wait` until its channel's `send` has been emitted; an unservable wait is a
+  reported **classical synchronization deadlock** (`test_compile_deadlock_detected`);
+- **gate cancellation** — adjacent self-inverse pairs (H H, X X, Z Z, CX CX)
+  cancel to a fixpoint;
+- **dead-qubit elimination** — unused resources no longer waste register slots.
+
+**Backends (Phase 4):** three emitters share the IR.
+
+| Target | Command | What it is |
+|--------|---------|------------|
+| OpenQASM 2.0 (default) | `qam compile f.qam` | flat circuit, runs on any QASM simulator/hardware stack |
+| OpenQASM 3.0 | `qam compile f.qam --qasm3` | real classical types: `bit m0; m0 = measure q[1]; if (m0 == 1) { x q[2]; }`, and superdense's classical message becomes a genuine `input bit i;` runtime parameter |
+| **Concurrent, target (b)** | `qam compile f.qam --concurrent` | the paper's Concurrent SQIR shape: one process per membrane, pinned to its Σ region (`process 0 owns q[0,1] { ... }`), shared quantum state, explicit `send`/`wait` — **no scheduling pass**, locality preserved |
+
+The concurrent target is **executable**: `qam simulate f.qam --concurrent` runs
+`Sim.run_ir`, a runtime scheduler that interleaves the per-membrane processes
+against the shared branching statevector, blocking each `wait` until its
+`send` has executed (a circular wait raises a deadlock failure). Teleportation
+passes the same physics checks on the concurrent runtime as on the flat
+backend — in either membrane order (`test_concurrent_sim_*`).
+
+**Locality check:** `Ir.cross_region` lists every instruction that touches
+another membrane's region. For teleportation it reports exactly one — Cohere's
+collaborative Bell-pair `cx` — matching the paper's reading that channel
+creation is the only joint operation (`test_concurrent_locality`).
+
+**Known limits:** classical channels carry one residue; `N = 1` qubit per
+message and one encode per channel; projective channels are resolved
+syntactically (a receive-bound name stands for its channel), not semantically;
+codegen commits Choice to the left branch (the abstract machine explores
+both); the concurrent runtime executes one valid interleaving (protocol
+synchronization makes the result interleaving-independent for the supported
+fragment).
 
 ## Side demo: quantum chemistry / VQE (standalone)
 

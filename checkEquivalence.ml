@@ -4,6 +4,7 @@ let rec check_resource_equivalence (r1 : resource) (r2 : resource) : bool =
   match r1, r2 with
   | SimpleResource s1, SimpleResource s2 -> s1 = s2
   | NullResource, NullResource -> true
+  | ChannelParty (c1, m1), ChannelParty (c2, m2) -> c1 = c2 && m1 = m2
   | CombinedResource (r11, m1), CombinedResource (r21, m2) ->
     check_resource_equivalence r11 r21 && m1 = m2
   | MeetOperation (r11, r12), MeetOperation (r21, r22) ->
@@ -13,8 +14,10 @@ let rec check_resource_equivalence (r1 : resource) (r2 : resource) : bool =
 let rec check_process_equivalence (p1 : process) (p2 : process) : bool =
   match p1, p2 with
   | NullProcess, NullProcess -> true
+  | ProcessRef n1, ProcessRef n2 -> n1 = n2
   | ActionProcess (a1, p1), ActionProcess (a2, p2) ->
-    a1 = a2 && check_process_equivalence p1 p2
+    (* compare the action content only; source locations are irrelevant *)
+    a1.act = a2.act && check_process_equivalence p1 p2
   | Choice (p11, p12), Choice (p21, p22) ->
     check_process_equivalence p11 p21 && check_process_equivalence p12 p22
   | Replication p1, Replication p2 -> check_process_equivalence p1 p2
@@ -56,16 +59,26 @@ let rec check_membrane_equivalence (m1 : membrane) (m2 : membrane) : bool =
    Choice commutativity, alpha-equivalence, bisimulation. *)
 let rec canon_resource (r : resource) : resource =
   match r with
-  | SimpleResource _ | NullResource -> r
+  | SimpleResource _ | NullResource | ChannelParty _ -> r
   | CombinedResource (r1, m) -> CombinedResource (canon_resource r1, m)
   | MeetOperation (r1, r2) ->
     let a = canon_resource r1 and b = canon_resource r2 in
     if compare a b <= 0 then MeetOperation (a, b) else MeetOperation (b, a)
 
+(* Source locations must not influence canonical forms (the multiset sort keys
+   on the whole molecule value), so canon erases them. *)
+let rec strip_locs_process = function
+  | ActionProcess (a, k) ->
+      ActionProcess ({ a with loc = Ast.dummy_loc }, strip_locs_process k)
+  | Choice (a, b) -> Choice (strip_locs_process a, strip_locs_process b)
+  | Replication r -> Replication (strip_locs_process r)
+  | (NullProcess | ProcessRef _) as x -> x
+
 let canon_molecule (mol : molecule) : molecule =
   match mol with
   | ResourceMolecule r -> ResourceMolecule (canon_resource r)
-  | ProcessMolecule _ | NullMolecule -> mol
+  | ProcessMolecule p -> ProcessMolecule (strip_locs_process p)
+  | NullMolecule -> mol
 
 let rec canonicalize (m : membrane) : membrane =
   match m with

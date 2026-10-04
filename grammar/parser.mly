@@ -3,9 +3,9 @@
 %}
 
 %token <string> IDENT
-%token NU O REP ZERO
+%token NU O REP ZERO LET
 %token LBRACE RBRACE COMMA DOT BANG QUESTION LEFTARROW RIGHTARROW EOF
-%token PLUS AIRLOCK_L AIRLOCK_R AMP
+%token PLUS AIRLOCK_L AIRLOCK_R AMP EQUALS SEMI
 
 %right REP
 %left PLUS
@@ -13,13 +13,17 @@
 
 %start main
 
-%type <Ast.membrane list> main
+%type <(string * Ast.process) list * Ast.membrane list> main
 
 %%
 
 main:
-  | membranes EOF { $1 }
+  | definitions membranes EOF { ($1, $2) }
   | error { raise Parse_error }
+
+definitions:
+  | { [] }
+  | definitions LET IDENT EQUALS process SEMI { $1 @ [ ($3, $5) ] }
 
 membranes:
   | membrane { [$1] }
@@ -48,6 +52,7 @@ prefix_process:
 atomic_process:
   | ZERO { NullProcess }
   | action DOT prefix_process { ActionProcess ($1, $3) }
+  | action DOT IDENT { ActionProcess ($1, ProcessRef $3) }
   | action DOT { ActionProcess ($1, NullProcess) }
 
 resource:
@@ -59,8 +64,8 @@ atomic_resource:
   | O { NullResource }
 
 action:
-  | NU IDENT { NewChannel $2 }
-  | IDENT BANG IDENT { Send { chan = $1; arg = $3 } }
-  | IDENT QUESTION IDENT { Receive { chan = $1; arg = $3 } }
-  | IDENT LEFTARROW IDENT { LeftCombine ($1 ^ "<-" ^ $3) }
-  | IDENT RIGHTARROW IDENT { RightCombine ($1 ^ "->" ^ $3) }
+  | NU IDENT { mk_action ~loc:$startpos (NewChannel $2) }
+  | IDENT BANG IDENT { mk_action ~loc:$startpos (Send { chan = $1; arg = Named $3 }) }
+  | IDENT QUESTION IDENT { mk_action ~loc:$startpos (Receive { chan = $1; arg = $3 }) }
+  | IDENT LEFTARROW IDENT { mk_action ~loc:$startpos (Encode { chan = $1; msg = Named $3 }) }
+  | IDENT RIGHTARROW IDENT { mk_action ~loc:$startpos (Decode { chan = $1; binder = $3 }) }

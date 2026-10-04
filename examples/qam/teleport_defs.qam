@@ -1,0 +1,3 @@
+let Alice = nu c.c<-d.c->x.a!x. ;
+let Bob = nu c.c?u.a?z.u<-z. ;
+{ Alice, d, o }, { Bob, o }

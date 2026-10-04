@@ -138,16 +138,17 @@ let measure k reg br =
 
 let creg_value br r = match List.assoc_opt r br.cregs with Some v -> v | None -> 0
 
-(* Run the program. [init0] sets qubit 0 to alpha|0> + beta|1> (all other
-   qubits start at |0>); by default everything starts at |0...0>. *)
-let run ?init0 (qasm : string) : branch list =
+(* Run the program. [init] = (q, (alpha, beta)) sets qubit q to
+   alpha|0> + beta|1> (all other qubits start at |0>); by default everything
+   starts at |0...0>. *)
+let run ?init (qasm : string) : branch list =
   let nq, instrs = parse qasm in
   let dim = 1 lsl max 1 nq in
   let amp = Array.make dim Complex.zero in
-  (match init0 with
-  | Some (a, b) ->
+  (match init with
+  | Some (q, (a, b)) ->
       amp.(0) <- a;
-      amp.(1) <- b
+      amp.(1 lsl q) <- b
   | None -> amp.(0) <- Complex.one);
   let step branches ins =
     match ins with
@@ -162,3 +163,81 @@ let run ?init0 (qasm : string) : branch list =
         List.map (fun br -> if creg_value br r = 1 then apply1 z_pair k br else br) branches
   in
   List.fold_left step [ { amp; cregs = [] } ] instrs
+
+(* ---- concurrent runtime (target b) ----------------------------------------
+   Execute an Ir.circuit WITHOUT flattening: each membrane's process runs
+   against the shared (branching) statevector, and a `wait` blocks its process
+   until the matching `send` has executed in another process — a runtime
+   scheduler mirroring the paper's Concurrent SQIR execution model. An
+   unservable wait raises a deadlock failure. *)
+
+let run_ir ?init (c : Ir.circuit) : branch list =
+  let dim = 1 lsl max 1 c.Ir.nqubits in
+  let amp = Array.make dim Complex.zero in
+  (match init with
+  | Some (q, (a, b)) ->
+      amp.(0) <- a;
+      amp.(1 lsl q) <- b
+  | None -> amp.(0) <- Complex.one);
+  let branches = ref [ { amp; cregs = [] } ] in
+  let senders = Hashtbl.create 8 in
+  List.iter
+    (fun p ->
+      List.iter
+        (function Ir.SendC { chan; _ } -> Hashtbl.replace senders chan () | _ -> ())
+        p.Ir.body)
+    c.Ir.procs;
+  let sent = Hashtbl.create 8 in
+  let exec = function
+    | Ir.H k -> branches := List.map (apply1 h_pair k) !branches
+    | Ir.X k -> branches := List.map (apply1 x_pair k) !branches
+    | Ir.Z k -> branches := List.map (apply1 z_pair k) !branches
+    | Ir.CX (a, b) -> branches := List.map (apply_cx a b) !branches
+    | Ir.Measure { q; c; _ } -> branches := List.concat_map (measure q c) !branches
+    | Ir.CtrlX { c; q } ->
+        branches :=
+          List.map
+            (fun br -> if creg_value br c = 1 then apply1 x_pair q br else br)
+            !branches
+    | Ir.CtrlZ { c; q } ->
+        branches :=
+          List.map
+            (fun br -> if creg_value br c = 1 then apply1 z_pair q br else br)
+            !branches
+    | Ir.SendC { chan; _ } -> Hashtbl.replace sent chan ()
+    | Ir.WaitC _ | Ir.Note _ -> ()
+  in
+  let bodies = Array.of_list (List.map (fun p -> ref p.Ir.body) c.Ir.procs) in
+  let blocked = function
+    | Ir.WaitC { chan; _ } -> Hashtbl.mem senders chan && not (Hashtbl.mem sent chan)
+    | _ -> false
+  in
+  let progress = ref true in
+  while !progress do
+    progress := false;
+    Array.iter
+      (fun body ->
+        let rec drain () =
+          match !body with
+          | i :: tl when not (blocked i) ->
+              exec i;
+              body := tl;
+              progress := true;
+              drain ()
+          | _ -> ()
+        in
+        drain ())
+      bodies
+  done;
+  if Array.exists (fun b -> !b <> []) bodies then begin
+    let chans =
+      Array.to_list bodies
+      |> List.concat_map (fun b ->
+             match !b with Ir.WaitC { chan; _ } :: _ -> [ chan ] | _ -> [])
+      |> List.sort_uniq compare
+    in
+    failwith
+      (Printf.sprintf "concurrent execution deadlock on channel(s): %s"
+         (String.concat ", " chans))
+  end;
+  !branches
