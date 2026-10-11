@@ -49,6 +49,14 @@ type ctx = {
   decodes : (string, int * loc) Hashtbl.t;
   (* (membrane, resource/channel name) -> quantum-consumption count *)
   consumed : (int * string, int * loc) Hashtbl.t;
+  (* channel -> quantum-payload (encode of a quantum message) count. The paper:
+     "the created quantum channel can only be used to teleport one message" *)
+  payloads : (string, int * loc) Hashtbl.t;
+  (* encodes whose message is a receive-bound alias: whether that is a quantum
+     channel party (QES) or classical data depends on the aliased channel's
+     kind, which is only known after constraint solving — so they are recorded
+     here as (target, aliased channel, membrane, loc) and resolved at the end *)
+  pending : (string * string * int * loc) list ref;
 }
 
 let err ctx ?loc fmt =
@@ -134,20 +142,33 @@ let rec walk ctx g resources env p =
           (match chan_of chan with
           | Some c -> constrain ctx c KQuantum loc
           | None -> ());
-          (match msg with
+          (let target = match resolve env chan with Ok c -> Some c | Error _ -> None in
+           let quantum_payload () =
+             match target with
+             | Some c -> bump ctx.payloads c loc
+             | None -> ()
+           in
+           match msg with
           | Named n -> (
               match List.assoc_opt n env with
               | Some ResidueVar -> () (* classical residue: freely usable *)
-              | Some (Alias c) ->
-                  (* a received channel party used as quantum message (QES) *)
-                  bump ctx.consumed (g, c) loc
+              | Some (Alias c) -> (
+                  (* quantum party (QES) or classical data? resolved after
+                     kind solving *)
+                  match target with
+                  | Some t -> ctx.pending := (t, c, g, loc) :: !(ctx.pending)
+                  | None -> ())
               | None ->
-                  if List.mem n resources then
+                  if List.mem n resources then begin
                     (* named quantum resource in this membrane: linear *)
-                    bump ctx.consumed (g, n) loc
-                  else if Hashtbl.mem ctx.creators n then
+                    bump ctx.consumed (g, n) loc;
+                    quantum_payload ()
+                  end
+                  else if Hashtbl.mem ctx.creators n then begin
                     (* this membrane's party of a channel, sent as a message *)
-                    bump ctx.consumed (g, n) loc
+                    bump ctx.consumed (g, n) loc;
+                    quantum_payload ()
+                  end
                   (* otherwise: a classical input bit — no linearity constraint *))
           | Blank | Channeled _ | Projected _ | Residue _ | Meet _ ->
               err ctx ~loc "structured encode messages are not supported yet");
@@ -162,6 +183,8 @@ let check (membranes : membrane list) :
       creators = Hashtbl.create 16;
       decodes = Hashtbl.create 16;
       consumed = Hashtbl.create 16;
+      payloads = Hashtbl.create 8;
+      pending = ref [];
     }
   in
   (* pre-register creators so channel-party messages resolve regardless of
@@ -223,11 +246,30 @@ let check (membranes : membrane list) :
         err ctx "membrane %d creates %d channel(s) but holds only %d blank 'o' resource(s)" g
           needed have)
     membranes;
+  (* resolve pending alias-encodes: the message is a quantum channel party
+     (counts for linearity and payload) only if the aliased channel is quantum *)
+  List.iter
+    (fun (target, aliased, g, loc) ->
+      match Hashtbl.find_opt ctx.kinds aliased with
+      | Some (KQuantum, _) ->
+          bump ctx.consumed (g, aliased) loc;
+          bump ctx.payloads target loc
+      | _ -> () (* classical data: no linearity constraint *))
+    !(ctx.pending);
   (* linearity: decode-once per channel *)
   Hashtbl.iter
     (fun c (n, loc) ->
       if n > 1 then err ctx ~loc "channel %s is decoded %d times; a channel can be decoded once" c n)
     ctx.decodes;
+  (* one quantum payload per channel (the paper: a quantum channel can only be
+     used to teleport one message) *)
+  Hashtbl.iter
+    (fun c (n, loc) ->
+      if n > 1 then
+        err ctx ~loc
+          "channel %s is encoded with %d quantum payloads; a quantum channel teleports one message"
+          c n)
+    ctx.payloads;
   (* linearity: quantum resources / channel parties consumed at most once *)
   Hashtbl.iter
     (fun (g, n) (count, loc) ->

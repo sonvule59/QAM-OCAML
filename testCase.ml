@@ -63,103 +63,11 @@ let test_parser_choice_and_repl _ =
   ok "{ a!bc. + d?ea.}";
   ok "{ repl a!bq.}"
 
-(* Reduction regression: normalize each example file to its exact normal form.
-   Expected forms are documented in examples/qam/README.md. *)
 let read_file path =
   let ic = open_in path in
   let s = really_input_string ic (in_channel_length ic) in
   close_in ic;
   s
-
-let normal_form_of_file path =
-  match parse_membranes_from_string (read_file path) with
-  | Ok [ m ] -> string_of_membrane (normalize m)
-  | Ok _ -> assert_failure ("expected exactly one membrane in " ^ path)
-  | Error _ -> assert_failure ("parse failed for " ^ path)
-
-let test_encode_normal_form _ =
-  assert_equal ~printer:(fun s -> s) "{ 0, a & a }"
-    (normal_form_of_file "examples/qam/encode.qam")
-
-let test_cohere_normal_form _ =
-  assert_equal ~printer:(fun s -> s) "{ 0, 0 }"
-    (normal_form_of_file "examples/qam/cohere.qam")
-
-let test_decode_normal_form _ =
-  assert_equal ~printer:(fun s -> s) "{ 0, 0 }"
-    (normal_form_of_file "examples/qam/decode.qam")
-
-(* Choice and Replication now reduce (previously fixpoints, per audit). *)
-let reduces s =
-  match parse_membranes_from_string s with
-  | Ok [ m ] -> normalize m <> m
-  | _ -> assert_failure ("parse failed for " ^ s)
-
-let test_choice_reduces _ =
-  assert_bool "choice should reduce" (reduces "{ a!x. + b?y., o }")
-
-let test_replication_reduces _ =
-  assert_bool "replication should reduce" (reduces "{ repl nu c., o }")
-
-(* ---- Phase 2: equivalence policy (normalize -> canonicalize -> structural) ----
-   These exercise the real pipeline via check_equivalence_between_membranes. *)
-let parse_one s =
-  match parse_membranes_from_string s with
-  | Ok [ m ] -> m
-  | _ -> assert_failure ("parse failed for " ^ s)
-
-let is_equiv a b =
-  match check_equivalence_between_membranes (parse_one a) (parse_one b) with
-  | Equivalent -> true
-  | NotEquivalent _ -> false
-
-(* Positive: must be Equivalent *)
-let test_equiv_soup_permutation _ =
-  assert_bool "soup permutation" (is_equiv "{ 0, a & a }" "{ a & a, 0 }")
-
-let test_equiv_meet_commute _ =
-  assert_bool "meet commutativity" (is_equiv "{ 0, a & b }" "{ 0, b & a }")
-
-let test_equiv_reduce_then_equal _ =
-  assert_bool "cohere -> {0,0}" (is_equiv "{ nu c., c!x. }" "{ 0, 0 }");
-  assert_bool "decode -> {0,0}" (is_equiv "{ c->x., c?y. }" "{ 0, 0 }");
-  assert_bool "encode -> {0, a & a}" (is_equiv "{ a<-k., a }" "{ 0, a & a }")
-
-let test_equiv_reflexive_nf _ =
-  assert_bool "reflexive NF" (is_equiv "{ 0, 0 }" "{ 0, 0 }")
-
-let test_equiv_airlock_same _ =
-  assert_bool "identical airlocks"
-    (is_equiv "|[ { nu z., o }, phi, { c?d. } ]|"
-       "|[ { nu z., o }, phi, { c?d. } ]|")
-
-(* Negative: must be NotEquivalent *)
-let test_not_equiv_distinct_nf _ =
-  assert_bool "distinct NFs" (not (is_equiv "{ 0, a & a }" "{ 0, 0 }"))
-
-(* Documented MVP limit: Choice commits left, so p + q and q + p have
-   different normal forms and are NOT claimed equivalent. *)
-let test_not_equiv_choice_asymmetry _ =
-  assert_bool "choice asymmetry"
-    (not (is_equiv "{ a!x. + b?y., o }" "{ b?y. + a!x., o }"))
-
-let test_not_equiv_airlock_diff _ =
-  assert_bool "different airlock boundary"
-    (not
-       (is_equiv "|[ { nu z., o }, phi, { c?d. } ]|"
-          "|[ { nu z., o }, psi, { c?d. } ]|"))
-
-(* Replication policy: fuel-bounded normalize + canon (no true fixpoint). *)
-let test_equiv_repl_identical _ =
-  assert_bool "identical repl terms stay equivalent (same fuel)"
-    (is_equiv "{ repl nu c., o }" "{ repl nu c., o }")
-
-(* A repl term is NOT claimed equivalent to its one-step unfold: after the same
-   fuel budget the two fuel-bounded approximations differ. This asserts the
-   honest outcome, not a pretended replication normal form. *)
-let test_not_equiv_repl_vs_unfold _ =
-  assert_bool "repl not equivalent to its one-step unfold"
-    (not (is_equiv "{ repl nu c., o }" "{ nu c., repl nu c., o }"))
 
 (* ---- Path B / target (a): QAM -> flat OpenQASM (Compile.compile_to_qasm) ---- *)
 let contains_sub s sub =
@@ -359,6 +267,53 @@ let test_typecheck_residue_as_channel _ =
 (* the checker accepts the well-typed variant of the rejected shapes *)
 let test_typecheck_accepts_valid _ =
   assert_checks "{ nu c.c<-d.c->x., d, o }, { nu c.c?y., o }"
+
+(* one quantum payload per channel: "a quantum channel can only be used to
+   teleport one message" (paper, Sec. 2.2) *)
+let test_typecheck_one_payload _ =
+  assert_rejects ~containing:"quantum payloads"
+    "{ nu c.c<-d.c<-e.c->x., d, e, o }, { nu c.c?y., o }"
+
+(* N = 2 qubits per message (the paper's bandwidth N, Appendix E): layout
+   widens, gates loop per message qubit, residues carry two bits each. *)
+let test_width2_teleport _ =
+  let q =
+    match parse_membranes_from_string (read_file "examples/qam/teleport.qam") with
+    | Ok cfg -> Compile.compile_to_qasm ~width:2 cfg
+    | Error _ -> assert_failure "parse failed"
+  in
+  assert_bool "6 qubits" (contains_sub q "qreg q[6];");
+  assert_bool "second Bell pair" (contains_sub q "cx q[3], q[5];");
+  assert_bool "second encode CNOT" (contains_sub q "cx q[1], q[3];");
+  assert_bool "4 measurements" (contains_sub q "measure q[1] -> m3[0];");
+  assert_bool "second X correction" (contains_sub q "if(m1==1) x q[5];");
+  assert_bool "second Z correction" (contains_sub q "if(m3==1) z q[5];");
+  (* physics: init message qubit 0 to 0.6|0>+0.8|1>; Bob's q[4] must carry it
+     in every one of the 16 branches *)
+  let alpha = 0.6 and beta = 0.8 in
+  let branches =
+    Sim.run ~init:(0, ({ Complex.re = alpha; im = 0.0 }, { Complex.re = beta; im = 0.0 })) q
+  in
+  assert_equal ~printer:string_of_int 16 (List.length branches);
+  List.iter
+    (fun br ->
+      let bit r = match List.assoc_opt r br.Sim.cregs with Some v -> v | None -> 0 in
+      let base =
+        List.fold_left
+          (fun acc (r, qb) -> if bit r = 1 then acc lor (1 lsl qb) else acc)
+          0
+          [ ("m0", 2); ("m1", 3); ("m2", 0); ("m3", 1) ]
+      in
+      let a0 = br.Sim.amp.(base) and a1 = br.Sim.amp.(base lor 16) in
+      let p = Complex.norm2 a0 +. Complex.norm2 a1 in
+      assert_bool "branch probability 1/16" (Float.abs (p -. (1.0 /. 16.0)) < 1e-9);
+      let cross =
+        Complex.sub
+          (Complex.mul a0 { Complex.re = beta; im = 0.0 })
+          (Complex.mul a1 { Complex.re = alpha; im = 0.0 })
+      in
+      assert_bool "Bob's first qubit carries the message" (Complex.norm cross < 1e-9))
+    branches
 
 (* ---- Phase 1 Stage 3: named process definitions -------------------------- *)
 
@@ -633,6 +588,120 @@ let test_concurrent_deadlock_raises _ =
   assert_raises (Failure "concurrent execution deadlock on channel(s): a, b")
     (fun () -> Sim.run_ir c)
 
+(* ---- Phase 6: entanglement swap + the extended QAM (network.ml) ---------- *)
+
+let qes_src =
+  "{ nu c., o }, { nu c.nu d.d<-c.d->y.a1!y., o, o }, { nu d.d?w.a1?z.w<-z., o }"
+
+let qes_cfg () =
+  match parse_membranes_from_string qes_src with
+  | Ok c -> c
+  | Error _ -> assert_failure "QES parse failed"
+
+(* Quantum entanglement swap (paper Examples 9-10): the router hands its
+   c-party to Bob through channel d; terminally Ann and Bob share channel c. *)
+let test_machine_entanglement_swap _ =
+  let terms = Semantics.reachable_terminals ~depth:18 (qes_cfg ()) in
+  assert_bool "QES reaches { c.o }, { c.o }"
+    (List.exists
+       (fun (t, _) -> Semantics.string_of_config t = "{ c.o }, { c.o }")
+       terms)
+
+let qes_net =
+  {
+    Network.locs = [| "Ann"; "R"; "Bob" |];
+    theta = [ (("Ann", "R"), 0.5); (("R", "Bob"), 0.5) ];
+    intent = [ ("c", ("Ann", "Bob")); ("d", ("R", "Bob")) ];
+  }
+
+(* Extended QAM (Sec. 4.1): the QES run raises exactly the paper's labels —
+   0.5(Ann,R) for channel c, 0.5(R,Bob) for d, then rate-1 for the transfer:
+   total success rate 0.5 * 0.5 * 1 = 0.25. *)
+let test_network_qes_trace _ =
+  let ts = Network.ntraces ~policy:Network.QPass ~depth:18 qes_net (qes_cfg ()) in
+  let rendered =
+    List.map (fun t -> String.concat ";" (List.map Network.string_of_nlabel t)) ts
+  in
+  assert_bool "paper's likeliness trace present"
+    (List.mem "0.50(Ann,R);0.50(R,Bob);1.00(R,Bob)" rendered)
+
+(* rule Chan filters: without a theta edge the channel cannot be built *)
+let test_network_blocked_edge _ =
+  let net = { qes_net with Network.theta = [ (("Ann", "R"), 0.5) ] } in
+  let ts = Network.ntraces ~policy:Network.AnyEdge ~depth:18 net (qes_cfg ()) in
+  List.iter
+    (fun t ->
+      List.iter
+        (function
+          | Network.NRate (_, g, h) when (g, h) = ("R", "Bob") || (g, h) = ("Bob", "R") ->
+              assert_failure "channel d built despite missing theta edge"
+          | _ -> ())
+        t)
+    ts
+
+(* Fig. 9 graph with Example 13's rates: QPass commits to the shortest path
+   Ann-Ra-Bob; QCast to the SUM-maximizing path Ann-Rb-Rc-Bob. *)
+let fig9 rates =
+  {
+    Network.locs = [||];
+    theta =
+      [ (("Ann", "Cat"), List.nth rates 0); (("Ann", "Ra"), List.nth rates 1);
+        (("Ann", "Rb"), List.nth rates 2); (("Cat", "Ra"), List.nth rates 3);
+        (("Ra", "Dan"), List.nth rates 4); (("Ra", "Bob"), List.nth rates 5);
+        (("Dan", "Bob"), List.nth rates 6); (("Rb", "Rc"), List.nth rates 7);
+        (("Rc", "Bob"), List.nth rates 8) ];
+    intent = [ ("c", ("Ann", "Bob")) ];
+  }
+
+let ex13_net = fig9 [ 0.3; 0.5; 0.3; 0.3; 0.3; 0.3; 0.3; 0.5; 0.5 ]
+
+let test_qpass_qcast_paths _ =
+  assert_equal ~printer:(String.concat "-")
+    [ "Ann"; "Ra"; "Bob" ]
+    (match Network.chosen_path Network.QPass ex13_net ("Ann", "Bob") with
+    | Some p -> p
+    | None -> assert_failure "no QPass path");
+  assert_equal ~printer:(String.concat "-")
+    [ "Ann"; "Rb"; "Rc"; "Bob" ]
+    (match Network.chosen_path Network.QCast ex13_net ("Ann", "Bob") with
+    | Some p -> p
+    | None -> assert_failure "no QCast path")
+
+(* Example 12 vs 13: a channel creation on edge (Ann,Ra) is validated under
+   QPass (edge on the shortest path) but invalidated under QCast (the
+   max-sum path avoids Ra entirely). *)
+let test_qpass_vs_qcast_filtering _ =
+  let cfg =
+    match parse_membranes_from_string "{ nu c., o }, { nu c., o }" with
+    | Ok c -> c
+    | Error _ -> assert_failure "parse failed"
+  in
+  let net = { ex13_net with Network.locs = [| "Ann"; "Ra" |] } in
+  let render p =
+    Network.ntraces ~policy:p ~depth:4 net cfg
+    |> List.map (fun t -> String.concat ";" (List.map Network.string_of_nlabel t))
+  in
+  assert_bool "QPass validates (Ann,Ra)" (List.mem "0.50(Ann,Ra)" (render Network.QPass));
+  assert_bool "QCast invalidates (Ann,Ra)"
+    (not (List.exists (fun s -> s <> "") (render Network.QCast)))
+
+(* Defs. 17-19: likeliness order and bounded LQTR *)
+let test_likely_refinement _ =
+  assert_bool "lower rate refines higher"
+    (Network.likely_leq
+       [ Network.NRate (0.3, "A", "B") ]
+       [ Network.NRate (0.5, "A", "B") ]);
+  assert_bool "higher rate does not refine lower"
+    (not
+       (Network.likely_leq
+          [ Network.NRate (0.5, "A", "B") ]
+          [ Network.NRate (0.3, "A", "B") ]));
+  (* Theorem 20 flavor: on the line network both policies choose the same
+     paths, so the QPass system refines the QCast system *)
+  assert_bool "QPass refines QCast on the QES net"
+    (Network.likely_refines ~pol1:Network.QPass ~pol2:Network.QCast ~depth:18 qes_net
+       (qes_cfg ()))
+
 let test_chem_dsl_parse _ =
   let dsl =
     String.concat "\n"
@@ -682,21 +751,6 @@ let suite =
          "test_check_molecule_equivalence" >:: test_check_molecule_equivalence;
          "test_check_membrane_equivalence" >:: test_check_membrane_equivalence;
          "test_parser_choice_and_repl" >:: test_parser_choice_and_repl;
-         "test_encode_normal_form" >:: test_encode_normal_form;
-         "test_cohere_normal_form" >:: test_cohere_normal_form;
-         "test_decode_normal_form" >:: test_decode_normal_form;
-         "test_choice_reduces" >:: test_choice_reduces;
-         "test_replication_reduces" >:: test_replication_reduces;
-         "test_equiv_soup_permutation" >:: test_equiv_soup_permutation;
-         "test_equiv_meet_commute" >:: test_equiv_meet_commute;
-         "test_equiv_reduce_then_equal" >:: test_equiv_reduce_then_equal;
-         "test_equiv_reflexive_nf" >:: test_equiv_reflexive_nf;
-         "test_equiv_airlock_same" >:: test_equiv_airlock_same;
-         "test_not_equiv_distinct_nf" >:: test_not_equiv_distinct_nf;
-         "test_not_equiv_choice_asymmetry" >:: test_not_equiv_choice_asymmetry;
-         "test_not_equiv_airlock_diff" >:: test_not_equiv_airlock_diff;
-         "test_equiv_repl_identical" >:: test_equiv_repl_identical;
-         "test_not_equiv_repl_vs_unfold" >:: test_not_equiv_repl_vs_unfold;
          "test_compile_bell_pair" >:: test_compile_bell_pair;
          "test_compile_missing_blank" >:: test_compile_missing_blank;
          "test_compile_bit_commitment" >:: test_compile_bit_commitment;
@@ -714,6 +768,8 @@ let suite =
          "test_typecheck_double_decode" >:: test_typecheck_double_decode;
          "test_typecheck_residue_as_channel" >:: test_typecheck_residue_as_channel;
          "test_typecheck_accepts_valid" >:: test_typecheck_accepts_valid;
+         "test_typecheck_one_payload" >:: test_typecheck_one_payload;
+         "test_width2_teleport" >:: test_width2_teleport;
          "test_definitions_compile_equal" >:: test_definitions_compile_equal;
          "test_definitions_in_continuation" >:: test_definitions_in_continuation;
          "test_definitions_undefined_ref" >:: test_definitions_undefined_ref;
@@ -736,6 +792,12 @@ let suite =
          "test_concurrent_sim_teleport" >:: test_concurrent_sim_teleport;
          "test_concurrent_sim_receiver_first" >:: test_concurrent_sim_receiver_first;
          "test_concurrent_deadlock_raises" >:: test_concurrent_deadlock_raises;
+         "test_machine_entanglement_swap" >:: test_machine_entanglement_swap;
+         "test_network_qes_trace" >:: test_network_qes_trace;
+         "test_network_blocked_edge" >:: test_network_blocked_edge;
+         "test_qpass_qcast_paths" >:: test_qpass_qcast_paths;
+         "test_qpass_vs_qcast_filtering" >:: test_qpass_vs_qcast_filtering;
+         "test_likely_refinement" >:: test_likely_refinement;
          "test_chem_dsl_parse" >:: test_chem_dsl_parse;
          "test_vqe_loop_decreases_energy" >:: test_vqe_loop_decreases_energy;
          "test_openqasm_export" >:: test_openqasm_export;

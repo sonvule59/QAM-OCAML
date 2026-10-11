@@ -12,15 +12,21 @@ without writing circuits by hand.
 
 **What you get:**
 
-- **Parser + reduction interpreter** for QAM membranes, molecules, processes
-  and resources (ENCODE / DECODE / COHERE, Choice, Replication).
-- **Equivalence checker** — normalize, canonicalize, structurally compare
-  (documented policy below; not bisimulation).
-- **Compiler to OpenQASM 2.0** — protocols written as QAM configurations lower
-  to real circuits via the paper's task-block gate mappings.
+- **Typed front-end** — channel-kind inference (Ω), well-formedness and a
+  static no-cloning check, with positioned errors.
+- **The abstract machine** — the paper's configuration-level LTS: it *executes*
+  teleportation, superdense coding, bit-commitment and entanglement swap to
+  their paper-exact terminals; equivalence is trace refinement.
+- **Compiler** — circuit IR with scheduling, deadlock detection and
+  optimization passes; three backends: OpenQASM 2, OpenQASM 3, and the
+  paper's concurrent target (b).
 - **Built-in statevector simulator** — no Python/Qiskit needed; `dune test`
-  *proves* that the compiled teleportation circuit reproduces the message state
-  on Bob's qubit in every measurement branch.
+  *proves* the compiled (and concurrently executed) teleportation circuit
+  reproduces the message state on Bob's qubit in every branch, and a
+  property battery re-checks it on hundreds of randomized protocol variants.
+- **Network evaluation (extended QAM, Sec. 4)** — located membranes, θ
+  success-rate graphs, QPass/QCast routing policies, likeliness trace
+  refinement.
 
 ## Quick start
 
@@ -28,7 +34,7 @@ Requires [opam](https://opam.ocaml.org/doc/Install.html), then:
 
 ```bash
 opam install dune menhir ounit2
-dune build && dune test          # 32 tests
+dune build && dune test
 ```
 
 To install the `qam` binary into your opam switch: `opam install .`
@@ -78,13 +84,14 @@ see [`examples/qam/README.md`](examples/qam/README.md).
 
 ```text
 qam check FILE.qam      typecheck (channel kinds, well-formedness, no-cloning)
-qam run FILE.qam [N]    execute the abstract machine (LTS) to its terminals
+qam run FILE.qam        execute the abstract machine (LTS) to its terminals (--depth N)
 qam compile FILE.qam    typecheck, then compile to OpenQASM 2.0
     --qasm3                 ... to OpenQASM 3.0 (bits, if-statements, input parameters)
     --concurrent            ... to the concurrent circuit, target (b)
 qam simulate FILE.qam   compile, then run on the built-in statevector simulator
     --concurrent            ... on the concurrent runtime (per-process, blocking send/wait)
-qam repl                interactive reduction / equivalence REPL (legacy fragment)
+qam repl                interactive machine REPL (step through the LTS)
+qam compile/simulate also accept --width N (qubits per message, the paper's bandwidth N)
 ```
 
 (From a clone, prefix with `dune exec ./qam.exe --`; or `./run.sh <args>`.)
@@ -96,12 +103,13 @@ qam repl                interactive reduction / equivalence REPL (legacy fragmen
 | Lexer / Menhir grammar → `Ast.membrane list` (definitions elaborated away) | `grammar/`, `qam_ast/ast.ml` |
 | Static checker: channel-kind inference (Ω), well-formedness, static no-cloning | `typecheck.ml` |
 | **The abstract machine**: configuration-level LTS with the paper's rules, meet algebra ⊙, traces + trace refinement | `semantics.ml` |
-| Legacy single-membrane reducer + term printer (kept for the REPL and canon-equivalence fragment) | `interpreter.ml` |
+| Front-end driver: parsing with positioned errors, `let`-elaboration, binder freshening, term printers | `interpreter.ml` |
 | **Circuit IR**: per-membrane instruction lists with first-class send/wait; scheduling, deadlock detection, peephole + dead-qubit passes; three backends (QASM 2, QASM 3, concurrent target (b)) | `ir.ml` |
-| Canonicalizer + structural equivalence | `checkEquivalence.ml` |
-| QAM → OpenQASM 2.0 backend | `compile.ml` |
+| Structural-equality walkers | `checkEquivalence.ml` |
+| Lowering to the circuit IR (fixpoint classical dataflow, Σ layout, width N) | `compile.ml` |
 | Statevector simulator for the emitted QASM subset | `sim.ml` |
-| CLI (`compile` / `simulate` / `repl`) | `qam.ml` |
+| **Extended QAM** (Sec. 4): locations, θ rate graphs, QPass/QCast, likeliness refinement | `network.ml` |
+| CLI (`check` / `run` / `compile` / `simulate` / `repl`) | `qam.ml` |
 
 ## Surface syntax
 
@@ -148,82 +156,23 @@ protocols before codegen, with positioned errors:
 - **Static no-cloning (paper Thm. 3):** a named quantum resource is consumed by
   at most one encode; a channel party is used as a quantum message at most
   once; a channel is decoded at most once; a decode's classical residue cannot
-  be used as a channel.
+  be used as a channel; and a channel carries at most **one quantum payload**
+  ("a quantum channel can only be used to teleport one message", Sec. 2.2).
 
 ```text
 $ qam check bad.qam
 Type error: line 1, column 13: no-cloning violation: quantum resource d in membrane 0 is consumed 2 times
 ```
 
-## Reductions: parses vs. reduces
+## Semantics and equivalence
 
-"Parses" = the grammar builds an AST. "Reduces" = `normalize` changes the term
-via a reduction rule. The two are **not** the same — some terms parse but are
-already normal forms.
-
-**Parse and reduce** (locked by `testCase.ml`; exact normal forms in
-[`examples/qam/README.md`](examples/qam/README.md)):
-
-| Input | Rule | Normal form |
-|-------|------|-------------|
-| `{ a<-k., a }` | ENCODE | `{ 0, a & a }` |
-| `{ nu c., c!x. }` | COHERE | `{ 0, 0 }` |
-| `{ c->x., c?y. }` | DECODE | `{ 0, 0 }` |
-| `{ a!x. + b?y., o }` | Choice | `{ a!x., o }` (commits to left branch) |
-| `{ repl nu c., o }` | Replication | unfolds `repl P → P \| repl P`, bounded by fuel |
-
-**Parses only** (a valid AST, but no rule fires — it is its own normal form):
-
-```text
-|[ { nu z., o }, phi, { c?d. }]|
-```
-
-This airlock parses to `Ast.AirlockedMembrane`; the only cross-boundary rule is
-airlock DECODE (a `->` on the left meeting a matching `?` on the right), which
-this term does not trigger.
-
-## Equivalence policy
-
-Equivalence is a **documented, test-locked policy for the supported reducing
-fragment**, not bisimulation.
-
-**Definition.** For membranes `m1`, `m2`:
-
-```
-m1 ≡ m2   iff   canon(normalize(m1))  =_struct  canon(normalize(m2))
-```
-
-- `normalize` (fuel 128) reduces both sides using ENCODE/DECODE/COHERE/Choice/Replication.
-- `canon` (`CheckEquivalence.canonicalize`) rewrites the normal form so that
-  irrelevant syntactic differences collapse.
-- `=_struct` is the structural walk `CheckEquivalence.check_membrane_equivalence`.
-- Both sides use the **same** fuel, so equivalence is not fuel-sensitive.
-
-**What canon normalizes (IN — we claim these):**
-
-- **Soup as multiset** — molecule order in a `MoleculeMembrane` is irrelevant
-  (`{ 0, a & a } ≡ { a & a, 0 }`).
-- **Meet commutativity** — `a & b ≡ b & a`.
-- **Reduce-then-equal** — terms with the same canonical normal form
-  (`{ nu c., c!x. } ≡ { 0, 0 }`, `{ a<-k., a } ≡ { 0, a & a }`).
-- **NullMolecule cleanup** — dropped (never produced by parse/reduction).
-
-**What it does NOT do (OUT — explicit non-claims):**
-
-- **Bisimulation / observational equivalence** — not implemented (future work).
-- **Choice commutativity** — `p + q` is *not* `q + p`. Choice commits to the
-  left branch (MVP), so the two normalize to different terms and are reported
-  **NotEquivalent**. Locked by `test_not_equiv_choice_asymmetry`.
-- **Replication** — terms with live `repl` never reach a true fixpoint; they are
-  compared only as fuel-bounded approximations. Identical `repl` terms are
-  equivalent (same fuel); a `repl` term is **not** claimed equivalent to its
-  one-step unfold.
-- **Meet associativity flattening** — not performed; only binary commutativity.
-- **Airlocks** — compared structurally (children canonicalized); no new airlock
-  equivalence laws.
-- **Alpha-equivalence / binder renaming** — not implemented.
-
-See [`examples/qam/equiv.md`](examples/qam/equiv.md) for the worked ≡ / ≢ table.
+Execution semantics is the abstract machine below (`semantics.ml`): the
+paper's configuration-level LTS. **Equivalence is trace refinement**
+(Defs. 14-15): bounded `trace_refines` in general, exact
+`trace_refines_exact` for replication-free configurations. (The earlier
+normalize-then-canonicalize equivalence of the pre-machine fragment was
+retired together with the legacy single-membrane reducer.)
+`checkEquivalence.ml` retains the plain structural-equality walkers.
 
 ## The abstract machine (`semantics.ml`)
 
@@ -275,8 +224,7 @@ consumes), so `traces_exact` / `trace_refines_exact` compute the *unbounded*
 sets — refinement is exact there. With `repl` the LTS is infinite-state and
 only the bounded approximation is computable (exact inclusion is undecidable
 in general); `traces_exact` rejects such configurations rather than pretend.
-The legacy normalize-then-canonicalize equivalence (above) remains for the
-older fragment; trace refinement is the machine-level notion.
+Trace refinement is the project's equivalence notion.
 
 ## Compiling QAM to OpenQASM (`compile.ml`)
 
@@ -359,6 +307,89 @@ codegen commits Choice to the left branch (the abstract machine explores
 both); the concurrent runtime executes one valid interleaving (protocol
 synchronization makes the result interleaving-independent for the supported
 fragment).
+
+## Property-based verification (`propTest.ml`)
+
+Beyond the unit suite, `dune test` runs a deterministic property battery
+(seeded, no external dependency; failures print the generated configuration):
+
+- **Totality** — `step`, the typechecker and the compiler never raise on
+  arbitrary (including ill-typed) generated configurations.
+- **Dynamic no-cloning** — along every reachable machine state of generated
+  configurations, the resource-molecule count never increases and no channel
+  ever exceeds two parties (Thm. 3 as a runtime invariant).
+- **Trace-set sanity** — trace sets are prefix-closed (Def. 14) and refinement
+  is reflexive (Def. 15).
+- **Theorem 28, tested** — a generator of *randomized teleportation variants*
+  (fresh names, shuffled molecules, random membrane order, inert junk
+  molecules, optional Choice wrapping) checks that every variant
+  (a) typechecks, (b) **physically teleports** when compiled and simulated —
+  the qubit wiring is derived from the emitted circuit itself, so the check
+  survives shuffling and dead-qubit compaction — and (c) **abstractly
+  teleports in the machine** (some reachable terminal has the receiver holding
+  the message). The circuit and the machine agreeing on this observable across
+  randomized programs is the paper's simulation relation, tested rather than
+  proved.
+
+The properties are mutation-tested: swapping the compiler's Z-correction bit
+or disabling the machine's key-lock rule is caught by the battery.
+
+## Quantum networks: the extended QAM (`network.ml`)
+
+The paper's Section 4 extension, as a layer over the machine: membranes get
+**locations** (by position), **θ** is the success-rate graph over locations,
+and each channel's **intention** ξ names the (source, destination) it is meant
+to connect. `Network.step_net` filters the machine's labeled transitions by
+the rules Trans/Chan/Msg: channel creation on edge (g,h) raises rate θ(g,h)
+and must satisfy the routing predicate φ; ownership transfers (entanglement
+swap decodes) raise rate 1.
+
+Policies instantiate φ (Sec. 4.2): **QPass** admits only edges on the shortest
+source→destination path; **QCast** only those on the path maximizing the sum
+of assumed success rates — with the paper's Example 13 rates these commit to
+`Ann-Ra-Bob` and `Ann-Rb-Rc-Bob` respectively (`test_qpass_qcast_paths`), and
+a creation valid under QPass is rejected under QCast exactly as in
+Examples 12–13 (`test_qpass_vs_qcast_filtering`).
+
+The flagship run is **quantum entanglement swap** (`examples/qam/qes.qam`,
+paper Examples 9–10): the machine executes it to the terminal
+`{ c.o }, { c.o }` — Ann and Bob end up sharing channel `c` through the
+router — and on the Fig. 7 network it raises exactly the paper's likeliness
+trace `0.50(Ann,R); 0.50(R,Bob); 1.00(R,Bob)` (total success rate 0.25,
+matching Sec. 4.1). **Likeliness trace refinement** (Defs. 16–19) compares
+systems pointwise on rates (`Network.likely_refines`).
+
+## Testing, and validating on real quantum stacks
+
+**Local (no dependencies):** `dune build && dune test` runs the full battery —
+unit tests for every stage, physics checks on the built-in simulator (flat and
+concurrent runtimes), and the seeded property suite (totality, dynamic
+no-cloning, trace laws, randomized Theorem-28 variants). CI repeats it on
+Linux/macOS across OCaml 4.14 and 5.x.
+
+**On Qiskit (industry validation):** the emitted OpenQASM is plain-standard, so
+it runs unmodified on Qiskit Aer. `scripts/validate_qiskit.py` wraps the
+compiled protocol core the way a real experiment would — prepares
+`0.6|0> + 0.8|1>` on the message qubit, appends a measurement of the
+receiver — and checks 20,000-shot statistics, both natively and **transpiled
+to IBM's hardware basis `{rz, sx, x, cx}`**:
+
+```bash
+pip3 install --user qiskit qiskit-aer
+qam compile examples/qam/teleport.qam  > teleport.qasm
+qam compile examples/qam/bitcommit.qam > bitcommit.qasm
+python3 scripts/validate_qiskit.py teleport.qasm bitcommit.qasm
+# PASS  P(bob=1) = |beta|^2 [ibm basis {rz,sx,x,cx}]: 0.6428 vs 0.6400 ... ALL PASS
+```
+
+**On real hardware (IBM Quantum):** the same wrapper runs on physical devices
+via `qiskit-ibm-runtime` (free account + API token): replace `AerSimulator()`
+with a runtime backend and transpile to it. Two practical notes: the
+classically-controlled corrections (`if (m == 1) ...`) need a backend with
+dynamic-circuit support (most current IBM devices); on others, drop the
+corrections and post-select on the `m0 = m1 = 0` branch. Expect hardware
+numbers a few percent off the ideal 0.64 — that gap is the device's noise,
+not the compiler.
 
 ## Side demo: quantum chemistry / VQE (standalone)
 

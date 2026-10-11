@@ -37,9 +37,9 @@ open Ast
 
 type label =
   | Tau
-  | LChan of string        (* Cohere raises c *)
-  | LDecode of string * msg (* Decode raises ^c.mu *)
-  | LCom of string * msg   (* Com raises a.i *)
+  | LChan of string * (int * int)         (* Cohere raises c; the two membranes *)
+  | LDecode of string * msg * (int * int) (* Decode raises ^c.mu *)
+  | LCom of string * msg * (int * int)    (* Com raises a.i *)
 
 type rule =
   | RCohere | RCom | RDecode | REncode | RCLocal | RChoice | RRepl
@@ -49,9 +49,9 @@ let default_rules = [ RCohere; RCom; RDecode; REncode; RCLocal; RChoice; RRepl ]
 
 let string_of_label = function
   | Tau -> "tau"
-  | LChan c -> c
-  | LDecode (c, m) -> "^" ^ c ^ "." ^ Interpreter.string_of_msg m
-  | LCom (a, m) -> a ^ "." ^ Interpreter.string_of_msg m
+  | LChan (c, _) -> c
+  | LDecode (c, m, _) -> "^" ^ c ^ "." ^ Interpreter.string_of_msg m
+  | LCom (a, m, _) -> a ^ "." ^ Interpreter.string_of_msg m
 
 let is_projective n = String.length n > 0 && n.[0] = '^'
 let projective c = "^" ^ c
@@ -187,8 +187,10 @@ let find_party c rest =
       | _ -> None)
     (pick rest)
 
-(* ID1/ID2: null processes and empty membranes vanish *)
-let tidy (cfg : membrane list) : membrane list =
+(* ID1/ID2: null processes and empty membranes vanish. [keep_empty] keeps
+   empty membranes in place so membrane POSITIONS stay stable (the extended
+   QAM attaches locations by position; see network.ml). *)
+let tidy ?(keep_empty = false) (cfg : membrane list) : membrane list =
   cfg
   |> List.map (fun m ->
          match m with
@@ -196,7 +198,9 @@ let tidy (cfg : membrane list) : membrane list =
              MoleculeMembrane
                (List.filter (function ProcessMolecule NullProcess -> false | _ -> true) ms)
          | m -> m)
-  |> List.filter (function MoleculeMembrane [] -> false | _ -> true)
+  |> fun cfg' ->
+  if keep_empty then cfg'
+  else List.filter (function MoleculeMembrane [] -> false | _ -> true) cfg'
 
 (* replace membrane i's molecules *)
 let set_at cfg i ms =
@@ -204,11 +208,11 @@ let set_at cfg i ms =
 
 (* ---- one transition step -------------------------------------------------- *)
 
-let step ?(rules = default_rules) (cfg : membrane list) :
+let step ?(rules = default_rules) ?(keep_empty = false) (cfg : membrane list) :
     (label * membrane list) list =
   let has r = List.mem r rules in
   let out = ref [] in
-  let add l cfg' = out := (l, tidy cfg') :: !out in
+  let add l cfg' = out := (l, tidy ~keep_empty cfg') :: !out in
   let indexed =
     List.mapi (fun i m -> (i, m)) cfg
     |> List.filter_map (fun (i, m) ->
@@ -325,7 +329,7 @@ let step ?(rules = default_rules) (cfg : membrane list) :
                                  set_at cfg' j
                                    (ProcessMolecule (subst_var y iota tj) :: rest_j)
                                in
-                               add (LCom (a, iota)) cfg'
+                               add (LCom (a, iota, (i, j))) cfg'
                            | _ -> ())
                          (prefixes ms_j)
                    | _ -> ())
@@ -359,7 +363,7 @@ let step ?(rules = default_rules) (cfg : membrane list) :
                                                 (ChannelParty (pc, Residue mu))
                                            :: rest_j')
                                        in
-                                       add (LDecode (c, mu)) cfg'
+                                       add (LDecode (c, mu, (i, j))) cfg'
                                    | None -> ())
                                | _ -> ())
                              (prefixes ms_j)
@@ -392,7 +396,7 @@ let step ?(rules = default_rules) (cfg : membrane list) :
                                           :: ResourceMolecule (ChannelParty (c, Blank))
                                           :: rest_j')
                                       in
-                                      add (LChan c) cfg'
+                                      add (LChan (c, (i, j))) cfg'
                                   | None -> ())
                               | _ -> ())
                             (prefixes ms_j)

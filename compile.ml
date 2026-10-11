@@ -59,8 +59,10 @@ type party = {
   mutable rqubit : int option;
 }
 
-(* -> (total qubits, (membrane, resource name) -> qubit, channel -> party) *)
-let build_layout (membranes : membrane list) =
+(* -> (total qubits, (membrane, resource name) -> start qubit, channel -> party).
+   [width] is the paper's bandwidth N: qubits per message; every resource
+   molecule occupies a width-wide slot and the stored index is its START. *)
+let build_layout ?(width = 1) (membranes : membrane list) =
   let next = ref 0 in
   let named : (int * string, int) Hashtbl.t = Hashtbl.create 16 in
   let blanks : (int, int Queue.t) Hashtbl.t = Hashtbl.create 8 in
@@ -71,7 +73,7 @@ let build_layout (membranes : membrane list) =
       List.iter
         (fun r ->
           let idx = !next in
-          incr next;
+          next := !next + width;
           match r with
           | NullResource -> Queue.add idx q
           | SimpleResource name -> Hashtbl.replace named (i, name) idx
@@ -123,23 +125,26 @@ let channel_qubit parties c g =
    Unservable waits are reported as deadlocks by the scheduler.
    ========================================================================== *)
 
-(* lower a configuration to the circuit IR (shared by every backend) *)
-let lower (membranes : membrane list) : Ir.circuit =
-  let nqubits, named, parties = build_layout membranes in
-  (* each membrane's Sigma region: one slot per resource molecule, sequential *)
+(* lower a configuration to the circuit IR (shared by every backend);
+   [width] is qubits per message (the paper's N) *)
+let lower ?(width = 1) (membranes : membrane list) : Ir.circuit =
+  let nqubits, named, parties = build_layout ~width membranes in
+  (* each membrane's Sigma region: width qubits per resource molecule *)
   let regions =
     let next = ref 0 in
     List.mapi
       (fun i m ->
-        let n = List.length (membrane_resources m) in
+        let n = width * List.length (membrane_resources m) in
         let r = List.init n (fun k -> !next + k) in
         next := !next + n;
         (i, r))
       membranes
   in
-  (* classical channel -> residue cregs (X bit, optional Z bit); persists
+  (* classical channel -> residue cregs (X bits, optional Z bits); persists
      across lowering rounds so receiver-before-sender resolves next round *)
-  let classical : (string, string * string option) Hashtbl.t = Hashtbl.create 8 in
+  let classical : (string, string list * string list option) Hashtbl.t =
+    Hashtbl.create 8
+  in
   let resolve_chan env name =
     match List.assoc_opt name env with Some (`Chan c) -> c | _ -> name
   in
@@ -160,7 +165,7 @@ let lower (membranes : membrane list) : Ir.circuit =
     let lower_membrane g m =
       let out = ref [] in
       let push i = out := i :: !out in
-      let rec emit (env : (string * [ `Chan of string | `Res of string * string option ]) list) p =
+      let rec emit (env : (string * [ `Chan of string | `Res of string list * string list option ]) list) p =
         match p with
         | NullProcess -> ()
         | ActionProcess ({ act = NewChannel c; _ }, k) ->
@@ -168,8 +173,10 @@ let lower (membranes : membrane list) : Ir.circuit =
             | Some pt when pt.lmem = g -> (
                 match (pt.lqubit, pt.rqubit) with
                 | Some i, Some j ->
-                    push (Ir.H i);
-                    push (Ir.CX (i, j))
+                    for x = 0 to width - 1 do
+                      push (Ir.H (i + x));
+                      push (Ir.CX (i + x, j + x))
+                    done
                 | _ ->
                     push
                       (Ir.Note
@@ -208,18 +215,23 @@ let lower (membranes : membrane list) : Ir.circuit =
                 in
                 match msg_val with
                 | `Quantum mq ->
-                    (* Encode block, Fig. 10: CNOT message -> channel, H message *)
-                    push (Ir.CX (mq, i));
-                    push (Ir.H mq);
+                    (* Encode block, Fig. 10, per message qubit *)
+                    for x = 0 to width - 1 do
+                      push (Ir.CX (mq + x, i + x));
+                      push (Ir.H (mq + x))
+                    done;
                     Hashtbl.replace payload chan mq
-                | `Classical (xb, zb) ->
-                    let zbit = match zb with Some z -> z | None -> xb in
-                    push (Ir.CtrlX { c = xb; q = i });
-                    push (Ir.CtrlZ { c = zbit; q = i })
+                | `Classical (xbits, zbits) ->
+                    let zbits = match zbits with Some z -> z | None -> xbits in
+                    List.iteri (fun x xb -> push (Ir.CtrlX { c = xb; q = i + x })) xbits;
+                    List.iteri (fun x zb -> push (Ir.CtrlZ { c = zb; q = i + x })) zbits
                 | `Input ->
-                    declare_creg ~comment:" // classical input bit" msg;
-                    push (Ir.CtrlX { c = msg; q = i });
-                    push (Ir.CtrlZ { c = msg; q = i })
+                    for x = 0 to width - 1 do
+                      let bit = if width = 1 then msg else Printf.sprintf "%s_%d" msg x in
+                      declare_creg ~comment:" // classical input bit" bit;
+                      push (Ir.CtrlX { c = bit; q = i + x });
+                      push (Ir.CtrlZ { c = bit; q = i + x })
+                    done
                 | `Unresolved ->
                     push
                       (Ir.Note
@@ -229,24 +241,30 @@ let lower (membranes : membrane list) : Ir.circuit =
             let chan = resolve_chan env chan in
             match channel_qubit parties chan g with
             | Some i ->
-                let xb = fresh_creg () in
-                push
-                  (Ir.Measure
-                     { q = i; c = xb; note = Printf.sprintf " // decode channel %s" chan });
-                let zb =
-                  match Hashtbl.find_opt payload chan with
-                  | Some mq ->
-                      let z = fresh_creg () in
+                let xbits =
+                  List.init width (fun x ->
+                      let xb = fresh_creg () in
                       push
                         (Ir.Measure
-                           { q = mq; c = z; note = Printf.sprintf " // decode %s payload" chan });
-                      Some z
+                           { q = i + x; c = xb; note = Printf.sprintf " // decode channel %s" chan });
+                      xb)
+                in
+                let zbits =
+                  match Hashtbl.find_opt payload chan with
+                  | Some mq ->
+                      Some
+                        (List.init width (fun x ->
+                             let z = fresh_creg () in
+                             push
+                               (Ir.Measure
+                                  { q = mq + x; c = z; note = Printf.sprintf " // decode %s payload" chan });
+                             z))
                   | None -> None
                 in
                 push
                   (Ir.SendC
                      { chan; desc = Printf.sprintf "decode notification on channel %s" chan });
-                emit ((binder, `Res (xb, zb)) :: env) k
+                emit ((binder, `Res (xbits, zbits)) :: env) k
             | None ->
                 push
                   (Ir.Note
@@ -283,13 +301,14 @@ let lower (membranes : membrane list) : Ir.circuit =
             end
             else begin
               match Hashtbl.find_opt classical chan with
-              | Some ((xb, _) as r) ->
+              | Some ((xbits, _) as r) ->
                   push
                     (Ir.WaitC
                        {
                          chan;
                          desc =
-                           Printf.sprintf "receive %s := %s (classical channel %s)" arg xb chan;
+                           Printf.sprintf "receive %s := %s (classical channel %s)" arg
+                             (String.concat "," xbits) chan;
                        });
                   emit ((arg, `Res r) :: env) k
               | None ->
@@ -316,5 +335,5 @@ let lower (membranes : membrane list) : Ir.circuit =
   in
   fix (-1)
 
-let compile_to_qasm (membranes : membrane list) : string =
-  Ir.to_qasm (lower membranes)
+let compile_to_qasm ?width (membranes : membrane list) : string =
+  Ir.to_qasm (lower ?width membranes)
