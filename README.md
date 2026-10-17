@@ -382,14 +382,26 @@ python3 scripts/validate_qiskit.py teleport.qasm bitcommit.qasm
 # PASS  P(bob=1) = |beta|^2 [ibm basis {rz,sx,x,cx}]: 0.6428 vs 0.6400 ... ALL PASS
 ```
 
-**On real hardware (IBM Quantum):** the same wrapper runs on physical devices
-via `qiskit-ibm-runtime` (free account + API token): replace `AerSimulator()`
-with a runtime backend and transpile to it. Two practical notes: the
-classically-controlled corrections (`if (m == 1) ...`) need a backend with
-dynamic-circuit support (most current IBM devices); on others, drop the
-corrections and post-select on the `m0 = m1 = 0` branch. Expect hardware
-numbers a few percent off the ideal 0.64 — that gap is the device's noise,
-not the compiler.
+**On real hardware (IBM Quantum):** `scripts/run_ibm.py` runs the compiled
+circuit on physical devices via `qiskit-ibm-runtime`. Rehearse first with no
+account at all — `--fake` runs the full hardware pipeline (device basis,
+coupling map, calibration noise model) on a fake IBM backend:
+
+```bash
+pip3 install --user qiskit-ibm-runtime
+qam compile examples/qam/teleport.qam > teleport.qasm
+python3 scripts/run_ibm.py teleport.qasm --fake
+# backend : fake_manila
+# post-selected m0=m1=0: 1097/4096 shots
+# P(bob=1) = 0.5752   (ideal 0.6400)
+# verdict : teleported, within hardware noise (delta = 0.0648)
+```
+
+For a real device: save your IBM token once (see the script's docstring) and
+drop `--fake`; the script picks the least busy device, or `--backend NAME`.
+Backends without dynamic-circuit support need `--post-select` (strips the
+classically-controlled corrections and keeps the `m0 = m1 = 0` branch). The
+few-percent gap from the ideal 0.64 is the device's noise, not the compiler.
 
 ## Side demo: quantum chemistry / VQE (standalone)
 

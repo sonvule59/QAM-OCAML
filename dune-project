@@ -1,5 +1,6 @@
 (lang dune 3.4)
 (name qam)
+(version 0.3.0)
 
 (using menhir 2.1)
 
